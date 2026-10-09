@@ -251,7 +251,7 @@ public class TornadoVMMasterPlanPrefillDecode implements TornadoVMMasterPlan {
         }
 
         state.workspace.tempLogits.clear();
-        state.workspace.wrapLogits.clear();
+        // Not wrapLogits: the logits graph uploads it once and overwrites all of it every token.
         var logits =
                 executionPlan
                         .withGraph(taskGraphLayout.logitsIdx())

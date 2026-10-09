@@ -5,6 +5,7 @@ import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
@@ -54,6 +55,13 @@ public class Qwen3Q8_0FFNLayers
     // faster but the OpenCL backend miscompiles simdShuffleDown, so it is auto-selected by backend.
     private final boolean useWarpMatmul = SchedulerDetectionService.isWarpShuffleSupported();
 
+    /** Whether split attention runs the 128-wide lane-cooperative kernel. */
+    private boolean laneAttention() {
+        return !isMetalBackend
+                && useFp16KVCache()
+                && LaneAttentionPolicy.laneCooperativeAttention(nEmbdHead);
+    }
+
     public Qwen3Q8_0FFNLayers(
             String taskGraphName,
             Qwen3State state,
@@ -88,8 +96,12 @@ public class Qwen3Q8_0FFNLayers
         // Split-KV attention launches nHeads*nSplits workgroups, then a combine pass over nHeads
         // workgroups.
         WorkerGrid parallelAttentionWorker =
-                WorkerGridFactory.createAttentionWorker(
-                        config.numberOfHeads() * attentionSplits, nEmbdHead);
+                laneAttention()
+                        ? WorkerGridFactory.createLaneAttentionWorker(
+                                config.numberOfHeads() * attentionSplits,
+                                LaneAttentionPolicy.WARPS_PER_GROUP)
+                        : WorkerGridFactory.createAttentionWorker(
+                                config.numberOfHeads() * attentionSplits, nEmbdHead);
         WorkerGrid attentionCombineWorker =
                 WorkerGridFactory.createAttentionWorker(config.numberOfHeads(), nEmbdHead);
         // attn_output_proj worker (output projection)
@@ -329,7 +341,11 @@ public class Qwen3Q8_0FFNLayers
             if (useFp16KVCache()) {
                 unifiedLayer.task(
                         "attention",
-                        TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16Paged,
+                        laneAttention()
+                                ? TransformerPagedKvKernels
+                                        ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128
+                                : TransformerPagedKvKernels
+                                        ::processHeadsFlashAttentionSplitKVFP16Paged,
                         context,
                         qwen3State.workspace.wrapQ, // query vectors
                         qwen3State.workspace.wrapKeyCacheFP16, // key cache (FP16)

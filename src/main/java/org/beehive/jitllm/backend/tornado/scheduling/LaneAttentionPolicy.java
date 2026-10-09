@@ -56,7 +56,22 @@ public final class LaneAttentionPolicy {
     // @formatter:on
     public static final int WARPS_PER_GROUP = 16;
 
+    /**
+     * Warps per (head, split) group for the 64-wide lane-cooperative kernel. A 64-wide head is half
+     * the work per key of a 128-wide one, so fewer warps keep the group busy.
+     */
+    public static final int HEAD64_WARPS_PER_GROUP =
+            Integer.getInteger("jitllm.attention.laneWarps", 4);
+
     private LaneAttentionPolicy() {}
+
+    /** Whether the 64-wide lane-cooperative kernel runs on the target device. */
+    public static boolean laneCooperativeAttentionHead64(int headSize) {
+        return headSize == 64
+                && TornadoDevices.target()
+                        .capabilities()
+                        .supports(DeviceCapability.SHUFFLE_REDUCED_FP16_GEMV);
+    }
 
     /**
      * Whether the lane-cooperative kernel may be used for this head width on the active device.
