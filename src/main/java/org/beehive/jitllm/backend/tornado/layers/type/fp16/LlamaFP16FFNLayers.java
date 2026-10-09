@@ -5,6 +5,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayer
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.LlamaState;
@@ -63,7 +64,9 @@ public class LlamaFP16FFNLayers
         super(taskGraph, state, weights, config, schedulerType);
         this.llamaState = (LlamaState) state;
         var partitions = state.executionPolicy().splitKvPartitions();
-        this.splitKvAttention = partitions.isPresent();
+        // Split by default where the lane-cooperative kernel runs: one workgroup per head leaves
+        // most of the device idle and walks the whole context serially.
+        this.splitKvAttention = partitions.isPresent() || laneAttention();
         int working = partitions.orElse(State.SPLIT_KV);
         if (working > State.SPLIT_KV) {
             // The scratch array was allocated for State.SPLIT_KV partitions. A working value above
@@ -103,7 +106,11 @@ public class LlamaFP16FFNLayers
                         ? config.numberOfHeads() * attentionSplits
                         : config.numberOfHeads();
         WorkerGrid parallelAttentionWorker =
-                WorkerGridFactory.createAttentionWorker(attentionGroups, config.headSize());
+                splitKvAttentionEnabled() && laneAttention()
+                        ? WorkerGridFactory.createLaneAttentionWorker(
+                                attentionGroups, LaneAttentionPolicy.HEAD64_WARPS_PER_GROUP)
+                        : WorkerGridFactory.createAttentionWorker(
+                                attentionGroups, config.headSize());
         WorkerGrid attentionCombineWorker =
                 WorkerGridFactory.createAttentionWorker(config.numberOfHeads(), config.headSize());
 
@@ -500,6 +507,13 @@ public class LlamaFP16FFNLayers
         return (layerIndex == 0) ? "activationUpdate" : "layer_" + (layerIndex - 1);
     }
 
+    /** Whether split attention runs the 64-wide lane-cooperative kernel. */
+    protected boolean laneAttention() {
+        return useFp16KVCache()
+                && schedulerType == SchedulerType.NVIDIA
+                && LaneAttentionPolicy.laneCooperativeAttentionHead64(config.headSize());
+    }
+
     protected boolean splitKvAttentionEnabled() {
         return splitKvAttention && schedulerType == SchedulerType.NVIDIA;
     }
@@ -607,11 +621,14 @@ public class LlamaFP16FFNLayers
             if (useFp16KVCache()) {
                 unifiedLayer.task(
                         "attention",
-                        packedHalf2Attention
+                        laneAttention()
                                 ? TransformerPagedKvKernels
-                                        ::processHeadsFlashAttentionSplitKVFP16PackedPaged
-                                : TransformerPagedKvKernels
-                                        ::processHeadsFlashAttentionSplitKVFP16Paged,
+                                        ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64
+                                : packedHalf2Attention
+                                        ? TransformerPagedKvKernels
+                                                ::processHeadsFlashAttentionSplitKVFP16PackedPaged
+                                        : TransformerPagedKvKernels
+                                                ::processHeadsFlashAttentionSplitKVFP16Paged,
                         context,
                         state.workspace.wrapQ,
                         state.workspace.wrapKeyCacheFP16,
