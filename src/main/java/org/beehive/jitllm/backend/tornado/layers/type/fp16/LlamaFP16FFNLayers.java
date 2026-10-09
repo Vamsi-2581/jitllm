@@ -523,7 +523,7 @@ public class LlamaFP16FFNLayers
         return LAYERS_PER_GRAPH;
     }
 
-    static final int LAYERS_PER_GRAPH = Integer.getInteger("jitllm.debug.llamaGroup", 8);
+    static final int LAYERS_PER_GRAPH = 8;
 
     protected boolean splitKvAttentionEnabled() {
         return splitKvAttention && schedulerType == SchedulerType.NVIDIA;

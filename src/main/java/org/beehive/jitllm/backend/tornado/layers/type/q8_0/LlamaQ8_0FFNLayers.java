@@ -349,13 +349,18 @@ public class LlamaQ8_0FFNLayers
     /**
      * Adjacent decode layers per graph, which removes all but one host round trip per group. Groups
      * start at the stack's first layer, so a pipeline stage's never cross into the next stage.
+     *
+     * <p>Eight, measured on an A10 with Llama-3.2-1B (16 layers): tg128 at depth 0 and 680 reads
+     * 343 / 302 tok/s (Q4_0) and 280 / 249 (Q8_0) at one layer per graph, 364 / 316 and 292 / 261
+     * at eight, and within 1% of that at four and sixteen; eight leaves headroom in TornadoVM's
+     * fixed per-graph bytecode buffer.
      */
     @Override
     protected int layersPerGraph() {
         return LAYERS_PER_GRAPH;
     }
 
-    static final int LAYERS_PER_GRAPH = Integer.getInteger("jitllm.debug.llamaGroup", 8);
+    static final int LAYERS_PER_GRAPH = 8;
 
     /** Lanes per output row of the packed projections: a multiple of 32. */
     private static final int PACKED_LOCAL = 64;
