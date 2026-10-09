@@ -97,19 +97,27 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
      */
     @Override
     protected String predecessorGraphName(int layerIndex) {
-        return layerIndex > firstLayer ? "layer_" + (layerIndex - 1) : "activationUpdate";
+        return layerIndex > firstLayer ? layerGraphName(layerIndex - 1) : "activationUpdate";
     }
 
     @Override
     protected TaskGraph createFFNLayerTaskGraph(int layerIndex) {
-        var layerTaskGraphName = "layer_" + layerIndex;
-        TaskGraph unifiedLayer = new TaskGraph(layerTaskGraphName);
+        return appendFFNLayer(null, layerIndex);
+    }
 
-        String wrapXSrc = predecessorGraphName(layerIndex);
-        if (wrapXSrc != null) {
-            unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
-        } else {
-            unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+    @Override
+    protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
+        boolean firstInGraph = existing == null;
+        String tp = layerTaskPrefix(layerIndex);
+        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+
+        if (firstInGraph) {
+            String wrapXSrc = predecessorGraphName(layerIndex);
+            if (wrapXSrc != null) {
+                unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
+            } else {
+                unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+            }
         }
         // The projections as tensors: a packed one reaches the device through its repack graph,
         // which turns the uploaded blocks into tiles before any kernel reads them.
@@ -133,19 +141,21 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         } else {
             state.workspace.packedRepack.upload(unifiedLayer, layerWeights);
         }
-        unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
-        if (dp4a()) {
-            Object[] packed = PackedActivationTasks.buffers(state.workspace);
-            if (layerIndex == firstLayer) {
-                unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, packed);
-            } else {
-                consume(unifiedLayer, predecessorGraphName(layerIndex), packed);
+        if (firstInGraph) {
+            unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+            if (dp4a()) {
+                Object[] packed = PackedActivationTasks.buffers(state.workspace);
+                if (layerIndex == firstLayer) {
+                    unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, packed);
+                } else {
+                    consume(unifiedLayer, predecessorGraphName(layerIndex), packed);
+                }
             }
         }
 
         // === Attention Block ===
         unifiedLayer.task(
-                "attn_rms_reduce",
+                tp + "attn_rms_reduce",
                 rmsReduceKernel(),
                 context,
                 state.workspace.temp,
@@ -156,7 +166,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
 
         if (shouldUseFinalNormalization()) {
             unifiedLayer.task(
-                    "attn_rms_finalize",
+                    tp + "attn_rms_finalize",
                     TransformerComputeKernelsLayered::reductionFinalNormalization,
                     context,
                     state.workspace.temp,
@@ -166,7 +176,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
 
         rmsApply(
                 unifiedLayer,
-                "attn_rms_apply",
+                tp + "attn_rms_apply",
                 weights.rms_att_weightLayered[layerIndex].asFloatArray(),
                 state.workspace.temp);
 
@@ -174,19 +184,19 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
             // Three packed projections reading the one activation the apply quantized.
             packedProjection(
                     unifiedLayer,
-                    "q_proj",
+                    tp + "q_proj",
                     state.workspace.wrapQ,
                     weights.wqLayered[layerIndex],
                     config.dim());
             packedProjection(
                     unifiedLayer,
-                    "k_proj",
+                    tp + "k_proj",
                     state.workspace.wrapK,
                     weights.wkLayered[layerIndex],
                     config.kvDim());
             packedProjection(
                     unifiedLayer,
-                    "v_proj",
+                    tp + "v_proj",
                     state.workspace.wrapV,
                     weights.wvLayered[layerIndex],
                     config.kvDim());
@@ -199,7 +209,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
             // Llama's query width is dim; the kernel takes it explicitly so the same code serves a
             // family whose head dimension is stated independently.
             unifiedLayer.task(
-                    "qkv_projection",
+                    tp + "qkv_projection",
                     TransformerComputeKernelsQ4_0::fusedQKVMatmulQ4_0,
                     context,
                     state.workspace.wrapXb,
@@ -221,17 +231,17 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
 
         if (dp4a()) {
             // The attention output is a new activation: quantized fresh for the output projection.
-            quantize(unifiedLayer, "attn_out_quantize", state.workspace.wrapXb);
+            quantize(unifiedLayer, tp + "attn_out_quantize", state.workspace.wrapXb);
             packedResidualProjection(
                     unifiedLayer,
-                    "attn_output_proj",
+                    tp + "attn_output_proj",
                     TransformerComputeKernelsQ4_0::matrixVectorGenericWithResidualQ4_0DP4A,
                     weights.woLayered[layerIndex],
                     config.dim(),
                     config.dim());
         } else {
             unifiedLayer.task(
-                    "attn_output_proj",
+                    tp + "attn_output_proj",
                     TransformerComputeKernelsQ4_0::matrixVectorGenericWithResidualQ4_0,
                     context,
                     state.workspace.wrapXb,
@@ -244,7 +254,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
 
         // === FFN Block ===
         unifiedLayer.task(
-                "ffn_rms_reduce",
+                tp + "ffn_rms_reduce",
                 rmsReduceKernel(),
                 context,
                 state.workspace.tempFFN,
@@ -255,7 +265,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
 
         if (shouldUseFinalNormalization()) {
             unifiedLayer.task(
-                    "ffn_rms_finalize",
+                    tp + "ffn_rms_finalize",
                     TransformerComputeKernelsLayered::reductionFinalNormalization,
                     context,
                     state.workspace.tempFFN,
@@ -266,13 +276,13 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         // The task the Q8_0 path does not have: its gate/up kernel folds this in.
         rmsApply(
                 unifiedLayer,
-                "ffn_rms_apply",
+                tp + "ffn_rms_apply",
                 weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
                 state.workspace.tempFFN);
 
         if (dp4a() && weights.w1Layered[layerIndex].isPackedQ4()) {
             unifiedLayer.task(
-                    "ffn_gate_up",
+                    tp + "ffn_gate_up",
                     TransformerComputeKernelsQ4_0Packed::fusedFFNGateUpSiLUQ4_0Packed,
                     context,
                     state.workspace.wrapXbQuants,
@@ -284,7 +294,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                     config.hiddenDim());
         } else if (dp4a()) {
             unifiedLayer.task(
-                    "ffn_gate_up",
+                    tp + "ffn_gate_up",
                     TransformerComputeKernelsQ4_0::fusedFFNGateUpSiLUQ4_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
@@ -298,7 +308,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                     PACKED_LOCAL);
         } else {
             unifiedLayer.task(
-                    "ffn_gate_up",
+                    tp + "ffn_gate_up",
                     TransformerComputeKernelsQ4_0::fusedFFNGateUpSiLUQ4_0,
                     context,
                     state.workspace.wrapXb,
@@ -313,10 +323,10 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         boolean q4_1Down = weights.w2Layered[layerIndex].dataType() == DataType.Q4_1;
         if (dp4a()) {
             // SwiGLU's output, quantized fresh for the down projection.
-            quantize(unifiedLayer, "ffn_down_quantize", state.workspace.wrapHb);
+            quantize(unifiedLayer, tp + "ffn_down_quantize", state.workspace.wrapHb);
             packedResidualProjection(
                     unifiedLayer,
-                    "ffn_down_proj",
+                    tp + "ffn_down_proj",
                     q4_1Down
                             ? TransformerComputeKernelsQ4_1::matrixVectorGenericWithResidualQ4_1DP4A
                             : TransformerComputeKernelsQ4_0
@@ -327,7 +337,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         } else {
             // Q4_1 for the layers llama-quantize gave more bits; same arguments and grid.
             unifiedLayer.task(
-                    "ffn_down_proj",
+                    tp + "ffn_down_proj",
                     q4_1Down
                             ? TransformerComputeKernelsQ4_1::matrixVectorGenericWithResidualQ4_1
                             : TransformerComputeKernelsQ4_0::matrixVectorGenericWithResidualQ4_0,
@@ -508,7 +518,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
 
         for (int i = firstLayer; i < endLayer(config.numberOfLayers()); i++) {
             if (dp4a()) {
-                String layer = "layer_" + i + ".";
+                String layer = layerGraphName(i) + "." + layerTaskPrefix(i);
                 tornadoForwardScheduler.addWorkerGrid(layer + "attn_rms_reduce", rmsReduceWorker);
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
@@ -543,23 +553,23 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                 continue;
             }
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".attn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".attn_rms_apply", rmsNormWorker);
-            tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".qkv_projection", fusedQkvWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_rms_apply", rmsNormWorker);
+            tornadoForwardScheduler.addWorkerGrid(layerGraphName(i) + "." + layerTaskPrefix(i) + "qkv_projection", fusedQkvWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".rope_and_kv_cache", ropeWithCacheWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "rope_and_kv_cache", ropeWithCacheWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".attention", parallelAttentionWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attention", parallelAttentionWorker);
             addAttentionCombineGrid(tornadoForwardScheduler, i);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".attn_output_proj", configDimRowMajorGlobalWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_output_proj", configDimRowMajorGlobalWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".ffn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".ffn_rms_apply", rmsNormWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_rms_apply", rmsNormWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".ffn_gate_up", configHiddenDimRowMajorWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_gate_up", configHiddenDimRowMajorWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".ffn_down_proj", configDimRowMajorGlobalWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_down_proj", configDimRowMajorGlobalWorker);
         }
 
         return tornadoForwardScheduler;

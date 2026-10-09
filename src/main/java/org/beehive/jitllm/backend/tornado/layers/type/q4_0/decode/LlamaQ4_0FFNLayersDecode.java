@@ -43,7 +43,7 @@ public class LlamaQ4_0FFNLayersDecode extends LlamaQ4_0FFNLayers {
 
     @Override
     protected String predecessorGraphName(int layerIndex) {
-        return (layerIndex == firstLayer) ? "decodeActivation" : "layer_" + (layerIndex - 1);
+        return (layerIndex == firstLayer) ? "decodeActivation" : layerGraphName(layerIndex - 1);
     }
 
     // @formatter:off
@@ -74,7 +74,7 @@ public class LlamaQ4_0FFNLayersDecode extends LlamaQ4_0FFNLayers {
                         DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
             }
         } else {
-            String pred = "layer_" + (layerIndex - 1);
+            String pred = layerGraphName(layerIndex - 1);
             layer.consumeFromDevice(
                     pred,
                     context,

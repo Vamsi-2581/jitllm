@@ -87,15 +87,23 @@ public class LlamaQ8_0FFNLayers
      */
     @Override
     protected TaskGraph createFFNLayerTaskGraph(int layerIndex) {
-        var layerTaskGraphName = "layer_" + layerIndex;
-        TaskGraph unifiedLayer = new TaskGraph(layerTaskGraphName);
+        return appendFFNLayer(null, layerIndex);
+    }
+
+    @Override
+    protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
+        boolean firstInGraph = existing == null;
+        String tp = layerTaskPrefix(layerIndex);
+        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         // === Data Setup ===
-        String wrapXSrc = predecessorGraphName(layerIndex);
-        if (wrapXSrc != null) {
-            unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
-        } else {
-            unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+        if (firstInGraph) {
+            String wrapXSrc = predecessorGraphName(layerIndex);
+            if (wrapXSrc != null) {
+                unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
+            } else {
+                unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+            }
         }
         Object[] layerWeights = {
             // Copy-in weights per layer for batched-layered layout (Q8 format)
@@ -118,21 +126,23 @@ public class LlamaQ8_0FFNLayers
         } else {
             state.workspace.packedRepack.upload(unifiedLayer, layerWeights);
         }
-        unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
         boolean packed = PackedActivationTasks.enabled();
-        if (packed) {
-            Object[] buffers = PackedActivationTasks.buffers(state.workspace);
-            if (layerIndex == firstLayer) {
-                unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, buffers);
-            } else {
-                consume(unifiedLayer, predecessorGraphName(layerIndex), buffers);
+        if (firstInGraph) {
+            unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+            if (packed) {
+                Object[] buffers = PackedActivationTasks.buffers(state.workspace);
+                if (layerIndex == firstLayer) {
+                    unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, buffers);
+                } else {
+                    consume(unifiedLayer, predecessorGraphName(layerIndex), buffers);
+                }
             }
         }
 
         // === Attention Block ===
         // RMS Normalization
         unifiedLayer.task(
-                "attn_rms_reduce",
+                tp + "attn_rms_reduce",
                 rmsReduceKernel(),
                 context,
                 state.workspace.temp,
@@ -143,7 +153,7 @@ public class LlamaQ8_0FFNLayers
 
         if (shouldUseFinalNormalization()) {
             unifiedLayer.task(
-                    "attn_rms_finalize",
+                    tp + "attn_rms_finalize",
                     TransformerComputeKernelsLayered::reductionFinalNormalization,
                     context,
                     state.workspace.temp,
@@ -155,13 +165,13 @@ public class LlamaQ8_0FFNLayers
             // Packed integer dot products over the activation quantized once to Q8 blocks.
             PackedActivationTasks.rmsApplyAndQuantize(
                     unifiedLayer,
-                    "attn_rms_apply",
+                    tp + "attn_rms_apply",
                     context,
                     state.workspace,
                     weights.rms_att_weightLayered[layerIndex].asFloatArray(),
                     state.workspace.temp);
             unifiedLayer.task(
-                    "qkv_projection",
+                    tp + "qkv_projection",
                     TransformerComputeKernelsQ8_0DP4A::fusedQKVMatmulQ8_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
@@ -178,7 +188,7 @@ public class LlamaQ8_0FFNLayers
                     PACKED_LOCAL);
         } else {
             unifiedLayer.task(
-                    "attn_rms_apply",
+                    tp + "attn_rms_apply",
                     TransformerComputeKernelsLayered::reductionOneBlock2WithLayer,
                     context,
                     state.workspace.wrapXb,
@@ -188,7 +198,7 @@ public class LlamaQ8_0FFNLayers
 
             // QKV Projection (fused with Q8 dequantization)
             unifiedLayer.task(
-                    "qkv_projection",
+                    tp + "qkv_projection",
                     TransformerComputeKernelsLayered::fusedQKVMatmulQ8,
                     context,
                     state.workspace.wrapXb, // input (FP32)
@@ -217,9 +227,9 @@ public class LlamaQ8_0FFNLayers
         if (packed) {
             // The attention output is a new activation: quantized fresh for the projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, "attn_out_quantize", context, state.workspace, state.workspace.wrapXb);
+                    unifiedLayer, tp + "attn_out_quantize", context, state.workspace, state.workspace.wrapXb);
             unifiedLayer.task(
-                    "attn_output_proj",
+                    tp + "attn_output_proj",
                     TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
@@ -231,7 +241,7 @@ public class LlamaQ8_0FFNLayers
                     PACKED_LOCAL);
         } else {
             unifiedLayer.task(
-                    "attn_output_proj",
+                    tp + "attn_output_proj",
                     TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0Byte,
                     context,
                     state.workspace.wrapXb,
@@ -245,7 +255,7 @@ public class LlamaQ8_0FFNLayers
         // === FFN Block ===
         // RMS Normalization
         unifiedLayer.task(
-                "ffn_rms_reduce",
+                tp + "ffn_rms_reduce",
                 rmsReduceKernel(),
                 context,
                 state.workspace.tempFFN,
@@ -256,7 +266,7 @@ public class LlamaQ8_0FFNLayers
 
         if (shouldUseFinalNormalization()) {
             unifiedLayer.task(
-                    "ffn_rms_finalize",
+                    tp + "ffn_rms_finalize",
                     TransformerComputeKernelsLayered::reductionFinalNormalization,
                     context,
                     state.workspace.tempFFN,
@@ -267,13 +277,13 @@ public class LlamaQ8_0FFNLayers
         if (packed) {
             PackedActivationTasks.rmsApplyAndQuantize(
                     unifiedLayer,
-                    "ffn_rms_apply",
+                    tp + "ffn_rms_apply",
                     context,
                     state.workspace,
                     weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
                     state.workspace.tempFFN);
             unifiedLayer.task(
-                    "ffn_gate_up",
+                    tp + "ffn_gate_up",
                     TransformerComputeKernelsQ8_0DP4A::fusedFFNGateUpSiLUQ8_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
@@ -286,9 +296,9 @@ public class LlamaQ8_0FFNLayers
                     PACKED_LOCAL);
             // SwiGLU's output, quantized fresh for the down projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, "ffn_down_quantize", context, state.workspace, state.workspace.wrapHb);
+                    unifiedLayer, tp + "ffn_down_quantize", context, state.workspace, state.workspace.wrapHb);
             unifiedLayer.task(
-                    "ffn_down_proj",
+                    tp + "ffn_down_proj",
                     TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
@@ -301,7 +311,7 @@ public class LlamaQ8_0FFNLayers
         } else {
             // Fully fused: RMS apply + Gate/Up projections + SiLU + GLU (Q8 dequantization)
             unifiedLayer.task(
-                    "rms_ffn_gate_up",
+                    tp + "rms_ffn_gate_up",
                     TransformerComputeKernelsLayered::fullyFusedRmsNormFFNGateUpQ8,
                     context,
                     state.workspace.wrapX, // raw input (FP32)
@@ -315,7 +325,7 @@ public class LlamaQ8_0FFNLayers
 
             // Down projection (W2) with residual (Q8 dequantization)
             unifiedLayer.task(
-                    "ffn_down_proj",
+                    tp + "ffn_down_proj",
                     TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0Byte,
                     context,
                     state.workspace.wrapHb,
@@ -335,6 +345,17 @@ public class LlamaQ8_0FFNLayers
     protected String predecessorGraphName(int layerIndex) {
         return null;
     }
+
+    /**
+     * Adjacent decode layers per graph, which removes all but one host round trip per group. Groups
+     * start at the stack's first layer, so a pipeline stage's never cross into the next stage.
+     */
+    @Override
+    protected int layersPerGraph() {
+        return LAYERS_PER_GRAPH;
+    }
+
+    static final int LAYERS_PER_GRAPH = Integer.getInteger("jitllm.debug.llamaGroup", 8);
 
     /** Lanes per output row of the packed projections: a multiple of 32. */
     private static final int PACKED_LOCAL = 64;
@@ -443,11 +464,11 @@ public class LlamaQ8_0FFNLayers
 
         // === Per-Layer Grid Assignments (ordered by TaskGraph flow) ===
         for (int i = firstLayer; i < endLayer(config.numberOfLayers()); i++) {
-            String l = "layer_" + i + ".";
+            String l = layerGraphName(i) + "." + layerTaskPrefix(i);
             // --- Attention Block ---
             // RMS Normalization
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".attn_rms_reduce", rmsReduceWorker);
+                    l + "attn_rms_reduce", rmsReduceWorker);
             if (packed) {
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
@@ -481,14 +502,14 @@ public class LlamaQ8_0FFNLayers
                         l + "ffn_down_proj", configDimRowMajorGlobalWorker);
             }
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".rope_and_kv_cache", ropeWithCacheWorker);
+                    l + "rope_and_kv_cache", ropeWithCacheWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".attention", parallelAttentionWorker);
+                    l + "attention", parallelAttentionWorker);
             addAttentionCombineGrid(tornadoForwardScheduler, i);
             // --- FFN Block ---
             // RMS Normalization
             tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".ffn_rms_reduce", rmsReduceWorker);
+                    l + "ffn_rms_reduce", rmsReduceWorker);
         }
 
         return tornadoForwardScheduler;
@@ -499,11 +520,12 @@ public class LlamaQ8_0FFNLayers
      * family, so a subclass cannot write one cache representation while attention reads another.
      */
     protected void ropeAndKeyValueCache(TaskGraph unifiedLayer, int layerIndex) {
+        String tp = layerTaskPrefix(layerIndex);
         // The cache representation is independent of the weights: Q, K and V are FP32
         // activations here, so the FP16-cache kernels are the ones the FP16 weights use.
         if (useFp16KVCache()) {
             unifiedLayer.task(
-                    "rope_and_kv_cache",
+                    tp + "rope_and_kv_cache",
                     TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedFP16Paged,
                     context,
                     state.workspace.positionHolder,
@@ -522,7 +544,7 @@ public class LlamaQ8_0FFNLayers
                     state.kvBlockStride);
         } else {
             unifiedLayer.task(
-                    "rope_and_kv_cache",
+                    tp + "rope_and_kv_cache",
                     TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedPaged,
                     context,
                     state.workspace.positionHolder,
@@ -602,7 +624,7 @@ public class LlamaQ8_0FFNLayers
     protected void addAttentionCombineGrid(GridScheduler scheduler, int layer) {
         if (attentionSplits() > 0) {
             scheduler.addWorkerGrid(
-                    "layer_" + layer + ".attention_combine",
+                    layerGraphName(layer) + "." + layerTaskPrefix(layer) + "attention_combine",
                     WorkerGridFactory.createAttentionWorker(
                             config.numberOfHeads(), config.headSize()));
         }
@@ -610,6 +632,7 @@ public class LlamaQ8_0FFNLayers
 
     /** Attention is dtype-independent — a Q4_0 sibling reuses this unchanged. */
     protected TaskGraph configureAttention(TaskGraph unifiedLayer, int layerIndex) {
+        String tp = layerTaskPrefix(layerIndex);
         int splits = attentionSplits();
         if (splits > 0) {
             // Flash-decoding: every head's positions are split across several workgroups, and a
@@ -624,7 +647,7 @@ public class LlamaQ8_0FFNLayers
                                     : TransformerPagedKvKernels
                                             ::processHeadsFlashAttentionSplitKVFP16Paged;
             unifiedLayer.task(
-                    "attention",
+                    tp + "attention",
                     kernel,
                     context,
                     state.workspace.wrapQ,
@@ -642,7 +665,7 @@ public class LlamaQ8_0FFNLayers
                     state.kvBlockStride,
                     splits);
             return unifiedLayer.task(
-                    "attention_combine",
+                    tp + "attention_combine",
                     TransformerComputeKernelsLayered::combineSplitKVAttention,
                     context,
                     state.workspace.wrapAttSplit,
@@ -654,7 +677,7 @@ public class LlamaQ8_0FFNLayers
         if (useFp16KVCache()) {
             // Flash attention over the half-precision cache, FP32 accumulation.
             return unifiedLayer.task(
-                    "attention",
+                    tp + "attention",
                     TransformerPagedKvKernels::processHeadsFlashAttentionFP16Paged,
                     context,
                     state.workspace.wrapQ,
@@ -673,7 +696,7 @@ public class LlamaQ8_0FFNLayers
         }
         if (schedulerType == SchedulerType.NVIDIA) {
             return unifiedLayer.task(
-                    "attention",
+                    tp + "attention",
                     TransformerPagedKvKernels::processHeadsFlashAttentionPaged,
                     context,
                     state.workspace.wrapQ,
@@ -691,7 +714,7 @@ public class LlamaQ8_0FFNLayers
                     state.kvBlockStride);
         } else {
             return unifiedLayer.task(
-                    "attention",
+                    tp + "attention",
                     TransformerPagedKvKernels::processHeadsParallelPaged,
                     state.workspace.wrapQ,
                     state.workspace.wrapKeyCache,
