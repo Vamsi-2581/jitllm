@@ -51,12 +51,20 @@ public class JitllmApp {
             return;
         }
         boolean greedy = options.temperature() == 0.0f;
-        boolean fp16 = "FP16".equals(model.info().computeType().name());
+        // By weight type and model type: a quantized model's activation type is F32, half
+        // precision is spelled F16, and architecture() is the lower-cased model type. The FP16
+        // and Q8_0 logits layers (the latter also serves Q4_0 files) carry the on-device argmax.
+        var supported =
+                java.util.EnumSet.of(
+                        org.beehive.jitllm.runtime.tensor.DataType.F16,
+                        org.beehive.jitllm.runtime.tensor.DataType.Q8_0,
+                        org.beehive.jitllm.runtime.tensor.DataType.Q4_0);
+        boolean fp16 = supported.containsAll(model.info().weightTypes());
         String architecture = model.info().architecture();
         boolean wiredLoop =
-                architecture.equals("llama")
+                architecture.equals("llama_3")
                         || architecture.equals("mistral")
-                        || architecture.equals("qwen3");
+                        || architecture.equals("qwen_3");
         if (!(options.useTornadovm() && greedy && fp16 && wiredLoop)) {
             System.err.println(
                     "[deviceSample] ignored — requires GPU + greedy (temperature 0) + FP16 + Llama/Mistral/Qwen3");
