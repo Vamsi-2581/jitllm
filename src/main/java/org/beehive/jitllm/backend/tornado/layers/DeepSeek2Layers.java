@@ -44,6 +44,11 @@ public class DeepSeek2Layers
     /** Layers per task graph; the whole stage at the default. */
     static final int LAYERS_PER_GRAPH = 64;
 
+    @Override
+    protected int layersPerGraph() {
+        return LAYERS_PER_GRAPH;
+    }
+
     private final DeepSeek2State ds;
     private final DeepSeek2LayerWeights<TornadoTensor> w;
     private final String activationGraphName;
@@ -197,12 +202,6 @@ public class DeepSeek2Layers
         TaskGraph graph = new TaskGraph(layerGraphName(layerIndex));
         appendLayer(graph, layerIndex);
         return graph;
-    }
-
-    /** The graph holding {@code layerIndex}: named for the first layer in it. */
-    private String layerGraphName(int layerIndex) {
-        int offset = layerIndex - firstLayer;
-        return "layer_" + (firstLayer + offset - offset % LAYERS_PER_GRAPH);
     }
 
     private boolean firstLayerOfGraph(int layerIndex) {

@@ -242,22 +242,9 @@ public class Gemma4Q8_0FFNLayers
      */
     private static final int LAYERS_PER_GRAPH = 4;
 
-    /** The graph holding {@code layerIndex}, named for the first layer in it. */
-    private String layerGraphName(int layerIndex) {
-        int offset = layerIndex - firstLayer;
-        return "layer_" + (firstLayer + offset - offset % LAYERS_PER_GRAPH);
-    }
-
-    /**
-     * What keeps a graph's layers' tasks apart inside it.
-     *
-     * <p>Grid keys are {@code graphName.taskName}, so without this every layer in a graph would
-     * claim {@code layer_0.attn_norm_reduce}. The first layer of a graph keeps the bare names the
-     * ungrouped family used, so only the later slots' keys are new.
-     */
-    private String layerTaskPrefix(int layerIndex) {
-        int slot = (layerIndex - firstLayer) % LAYERS_PER_GRAPH;
-        return slot == 0 ? "" : "l" + slot + "_";
+    @Override
+    protected int layersPerGraph() {
+        return LAYERS_PER_GRAPH;
     }
 
     /** A task's name inside its graph. */
