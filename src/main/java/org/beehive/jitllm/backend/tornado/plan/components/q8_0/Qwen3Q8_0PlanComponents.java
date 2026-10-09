@@ -89,12 +89,22 @@ public class Qwen3Q8_0PlanComponents implements BatchPrefillDecodeForwardPlanCom
     @Override
     public AbstractLogitsTaskGraph singleTokenLogits(String previousGraphId) {
         return new LogitsQ8_0Layer(
-                "logits", state, weights, config, previousGraphId, schedulerType);
+                "logits", state, weights, config, previousGraphId, schedulerType) {
+            @Override
+            protected boolean familyProjectsQ8_0Packed() {
+                return Qwen3Q8_0FFNLayers.packedProjections();
+            }
+        };
     }
 
     @Override
     public AbstractLogitsTaskGraph decodeLogits(String previousGraphId) {
         return new LogitsQ8_0LayerDecode(
-                "logits", state, weights, config, previousGraphId, schedulerType);
+                "logits", state, weights, config, previousGraphId, schedulerType) {
+            @Override
+            protected boolean familyProjectsQ8_0Packed() {
+                return Qwen3Q8_0FFNLayers.packedProjections();
+            }
+        };
     }
 }

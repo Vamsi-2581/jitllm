@@ -105,6 +105,85 @@ public final class TransformerComputeKernelsQ8_0DP4A {
         }
     }
 
+    /** Row {@code rowId} of {@code w}·x reduced across the group; the total is valid in lane 0. */
+    private static float rowDot(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            ByteArray w,
+            int n,
+            int rowId,
+            int localWorkGroupSize,
+            float[] warpSums) {
+        int localId = context.localIdx;
+        int warpCount = localWorkGroupSize / 32;
+        float partial = rowPartial(context, xQuants, xScales, w, n, rowId, localWorkGroupSize);
+        partial += context.simdShuffleDown(partial, 16);
+        partial += context.simdShuffleDown(partial, 8);
+        partial += context.simdShuffleDown(partial, 4);
+        partial += context.simdShuffleDown(partial, 2);
+        partial += context.simdShuffleDown(partial, 1);
+        if ((localId & 31) == 0) {
+            warpSums[localId >> 5] = partial;
+        }
+        context.localBarrier();
+        float total = 0.0f;
+        for (int warp = 0; warp < warpCount; warp++) {
+            total += warpSums[warp];
+        }
+        return total;
+    }
+
+    /**
+     * The Q, K and V projections of one quantized activation in one launch: groups {@code [0,
+     * qDim)} produce Q from {@code wq}, the next {@code kvDim} K from {@code wk}, the last {@code
+     * kvDim} V from {@code wv}. Each branch is a whole row computation, so no weight array is
+     * selected at run time.
+     *
+     * <p>Worker: {@code (qDim + 2 kvDim) * localWorkGroupSize} lanes, local {@code
+     * localWorkGroupSize}, a multiple of 32.
+     */
+    public static void fusedQKVMatmulQ8_0DP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            FloatArray q,
+            FloatArray k,
+            FloatArray v,
+            ByteArray wq,
+            ByteArray wk,
+            ByteArray wv,
+            int n,
+            int qDim,
+            int kvDim,
+            int localWorkGroupSize) {
+        int rowId = context.groupIdx;
+        int localId = context.localIdx;
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        // Each condition is uniform across the group, so the barrier inside is reached by all.
+        if (rowId < qDim) {
+            float total =
+                    rowDot(context, xQuants, xScales, wq, n, rowId, localWorkGroupSize, warpSums);
+            if (localId == 0) {
+                q.set(rowId, total);
+            }
+        } else if (rowId < qDim + kvDim) {
+            int row = rowId - qDim;
+            float total =
+                    rowDot(context, xQuants, xScales, wk, n, row, localWorkGroupSize, warpSums);
+            if (localId == 0) {
+                k.set(row, total);
+            }
+        } else if (rowId < qDim + 2 * kvDim) {
+            int row = rowId - qDim - kvDim;
+            float total =
+                    rowDot(context, xQuants, xScales, wv, n, row, localWorkGroupSize, warpSums);
+            if (localId == 0) {
+                v.set(row, total);
+            }
+        }
+    }
+
     /** {@code hb[row] += w[row]·x}, the activation quantized. */
     public static void matrixVectorGenericWithResidualQ8_0DP4A(
             KernelContext context,
