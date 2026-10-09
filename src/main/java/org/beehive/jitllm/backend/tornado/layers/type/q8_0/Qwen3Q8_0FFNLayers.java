@@ -1,7 +1,5 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q8_0;
 
-import java.util.ArrayList;
-import java.util.List;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
@@ -18,7 +16,6 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
 import uk.ac.manchester.tornado.api.GridScheduler;
-import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
@@ -81,45 +78,12 @@ public class Qwen3Q8_0FFNLayers
      * buffer.
      */
     // @formatter:on
+    @Override
     protected int layersPerGraph() {
         return LAYERS_PER_GRAPH;
     }
 
     static final int LAYERS_PER_GRAPH = 7;
-
-    /** The graph holding {@code layerIndex}, named for the first layer in it. */
-    protected String layerGraphName(int layerIndex) {
-        int g = layersPerGraph();
-        return "layer_" + (layerIndex - layerIndex % g);
-    }
-
-    /**
-     * What keeps the layers of one graph from claiming each other's task names. The first layer of
-     * a graph keeps the bare names, so an ungrouped graph's names are unchanged.
-     */
-    protected String layerTaskPrefix(int layerIndex) {
-        int slot = layerIndex % layersPerGraph();
-        return slot == 0 ? "" : "l" + slot + "_";
-    }
-
-    /** One graph per group of {@link #layersPerGraph} layers; a group need not be full. */
-    @Override
-    protected void setupFFNLayers() {
-        int layers = config.numberOfLayers();
-        int perGraph = layersPerGraph();
-        List<ImmutableTaskGraph> graphs = new ArrayList<>((layers + perGraph - 1) / perGraph);
-        for (int first = 0; first < layers; first += perGraph) {
-            int last = Math.min(first + perGraph, layers) - 1;
-            TaskGraph graph = null;
-            for (int layer = first; layer <= last; layer++) {
-                graph = appendFFNLayer(graph, layer);
-            }
-            graph.persistOnDevice(state.workspace.wrapX, keyCache(), valueCache());
-            lastFFNLayerTaskGraphID = graph.getTaskGraphName();
-            graphs.add(graph.snapshot());
-        }
-        ffnLayerITGs = List.copyOf(graphs);
-    }
 
     private static WorkerGrid packedWorker(int rows) {
         return PackedActivationTasks.projectionWorker(rows, PACKED_LOCAL);
@@ -242,6 +206,7 @@ public class Qwen3Q8_0FFNLayers
      * carries the layer's {@link #layerTaskPrefix}, so the layers of one graph do not collide.
      */
     // @formatter:on
+    @Override
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
@@ -689,6 +654,8 @@ public class Qwen3Q8_0FFNLayers
                     config.dim(), // output dim
                     LOCAL_WORK_GROUP_SIZE_ALLOC);
         }
+
+        unifiedLayer.persistOnDevice(state.workspace.wrapX, keyCache(), valueCache());
 
         return unifiedLayer;
     }

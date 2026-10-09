@@ -17,7 +17,6 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
 import uk.ac.manchester.tornado.api.GridScheduler;
-import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
@@ -273,6 +272,7 @@ public class Qwen3FP16FFNLayers
      * per-layer weights included, is identical either way.
      */
     // @formatter:on
+    @Override
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         boolean firstInGraph = existing == null;
         var taskGraphName = layerGraphName(layerIndex);
@@ -678,68 +678,6 @@ public class Qwen3FP16FFNLayers
     }
 
     // @formatter:on
-
-    // @formatter:off
-    /**
-     * How many transformer layers this family puts in one layer graph.
-     *
-     * <p>One by default, which is the shape every family that extends this class has had. A
-     * subclass that returns more gets the same tasks, in the same order, over the same buffers,
-     * submitted in fewer graphs — and since a graph submission ends in a device wait, fewer of them
-     * is the point. Not user-settable: the grouping is a property of a family's plan.
-     */
-    // @formatter:on
-    protected int layersPerGraph() {
-        return 1;
-    }
-
-    /** The graph holding {@code layerIndex}, named for the first layer in it. */
-    protected String layerGraphName(int layerIndex) {
-        int g = layersPerGraph();
-        return "layer_" + (layerIndex - layerIndex % g);
-    }
-
-    // @formatter:off
-    /**
-     * What keeps the layers inside one graph from claiming each other's task names.
-     *
-     * <p>A grid key is {@code graphName.taskName}, so without this every layer in a group would
-     * register {@code layer_0.attn_rms_reduce}. The first layer of a graph keeps the bare names the
-     * ungrouped shape used, so only the later slots' keys are new.
-     */
-    // @formatter:on
-    protected String layerTaskPrefix(int layerIndex) {
-        int g = layersPerGraph();
-        int slot = layerIndex % g;
-        return slot == 0 ? "" : "l" + slot + "_";
-    }
-
-    // @formatter:off
-    /**
-     * One graph per group of layers, or the inherited one-per-layer construction when a family does
-     * not group.
-     */
-    // @formatter:on
-    @Override
-    protected void setupFFNLayers() {
-        int perGraph = layersPerGraph();
-        if (perGraph <= 1) {
-            super.setupFFNLayers();
-            return;
-        }
-        int layers = config.numberOfLayers();
-        List<ImmutableTaskGraph> graphs = new ArrayList<>((layers + perGraph - 1) / perGraph);
-        for (int first = 0; first < layers; first += perGraph) {
-            int last = Math.min(first + perGraph, layers) - 1;
-            TaskGraph graph = null;
-            for (int layer = first; layer <= last; layer++) {
-                graph = appendFFNLayer(graph, layer);
-            }
-            lastFFNLayerTaskGraphID = graph.getTaskGraphName();
-            graphs.add(graph.snapshot());
-        }
-        ffnLayerITGs = List.copyOf(graphs);
-    }
 
     /**
      * Returns the explicit predecessor graph name for consumeFromDevice.

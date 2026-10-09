@@ -1,5 +1,6 @@
 package org.beehive.jitllm.backend.tornado.layers;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.IntStream;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
@@ -58,11 +59,73 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
     /** Creates the {@link ImmutableTaskGraph} list for each transformer layer. */
     protected void setupFFNLayers() {
         int numLayers = config.numberOfLayers();
+        int perGraph = layersPerGraph();
+        if (perGraph <= 1) {
+            this.ffnLayerITGs =
+                    IntStream.range(firstLayer, endLayer(numLayers))
+                            .mapToObj(this::setupFFNLayer)
+                            .toList();
+            return;
+        }
+        int end = endLayer(numLayers);
+        List<ImmutableTaskGraph> graphs = new ArrayList<>((end - firstLayer + perGraph - 1) / perGraph);
+        for (int first = firstLayer; first < end; first += perGraph) {
+            int last = Math.min(first + perGraph, end) - 1;
+            TaskGraph graph = null;
+            for (int layer = first; layer <= last; layer++) {
+                graph = appendFFNLayer(graph, layer);
+            }
+            lastFFNLayerTaskGraphID = graph.getTaskGraphName();
+            graphs.add(graph.snapshot());
+        }
+        this.ffnLayerITGs = List.copyOf(graphs);
+    }
 
-        this.ffnLayerITGs =
-                IntStream.range(firstLayer, endLayer(numLayers))
-                        .mapToObj(this::setupFFNLayer)
-                        .toList();
+    // @formatter:off
+    /**
+     * How many adjacent transformer layers one layer graph holds.
+     *
+     * <p>One by default. A family that returns more gets the same tasks, in the same order, over
+     * the same buffers, submitted in fewer graphs, and since every graph submission ends in a
+     * device wait, fewer of them is the point. Such a family implements {@link #appendFFNLayer},
+     * names its graphs and tasks through {@link #layerGraphName} and {@link #layerTaskPrefix}, and
+     * binds the buffers shared with the previous graph only in the layer that opens a graph. Groups
+     * start at the stack's first layer, so a pipeline stage's groups never cross into the next
+     * stage. Not user-settable: the grouping is a property of a family's plan.
+     */
+    // @formatter:on
+    protected int layersPerGraph() {
+        return 1;
+    }
+
+    /** The graph holding {@code layerIndex}, named for the first layer in it. */
+    protected String layerGraphName(int layerIndex) {
+        return "layer_" + (layerIndex - (layerIndex - firstLayer) % layersPerGraph());
+    }
+
+    /**
+     * What keeps the layers of one graph from claiming each other's task names. A grid key is
+     * {@code graphName.taskName}; the first layer of a graph keeps the bare names, so an ungrouped
+     * graph's keys are the ones it always had.
+     */
+    protected String layerTaskPrefix(int layerIndex) {
+        int slot = (layerIndex - firstLayer) % layersPerGraph();
+        return slot == 0 ? "" : "l" + slot + "_";
+    }
+
+    /** Whether {@code layerIndex} opens its graph, and so binds what the graph shares. */
+    protected boolean opensGraph(int layerIndex) {
+        return (layerIndex - firstLayer) % layersPerGraph() == 0;
+    }
+
+    /**
+     * Layer {@code layerIndex}'s tasks, in a new graph when {@code existing} is null and appended
+     * to {@code existing} otherwise. Implemented by the families whose {@link #layersPerGraph} is
+     * more than one.
+     */
+    protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
+        throw new UnsupportedOperationException(
+                getClass().getSimpleName() + " builds one layer per graph");
     }
 
     /**
