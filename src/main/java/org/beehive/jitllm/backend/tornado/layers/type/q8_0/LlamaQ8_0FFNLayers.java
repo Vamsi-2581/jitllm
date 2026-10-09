@@ -1,8 +1,10 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q8_0;
 
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ8_0DP4A;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks;
 import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
@@ -117,6 +119,15 @@ public class LlamaQ8_0FFNLayers
             state.workspace.packedRepack.upload(unifiedLayer, layerWeights);
         }
         unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+        boolean packed = PackedActivationTasks.enabled();
+        if (packed) {
+            Object[] buffers = PackedActivationTasks.buffers(state.workspace);
+            if (layerIndex == firstLayer) {
+                unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, buffers);
+            } else {
+                consume(unifiedLayer, predecessorGraphName(layerIndex), buffers);
+            }
+        }
 
         // === Attention Block ===
         // RMS Normalization
@@ -140,30 +151,57 @@ public class LlamaQ8_0FFNLayers
                     config.rmsNormEps());
         }
 
-        unifiedLayer.task(
-                "attn_rms_apply",
-                TransformerComputeKernelsLayered::reductionOneBlock2WithLayer,
-                context,
-                state.workspace.wrapXb,
-                state.workspace.wrapX,
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                state.workspace.temp);
+        if (packed) {
+            // Packed integer dot products over the activation quantized once to Q8 blocks.
+            PackedActivationTasks.rmsApplyAndQuantize(
+                    unifiedLayer,
+                    "attn_rms_apply",
+                    context,
+                    state.workspace,
+                    weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.temp);
+            unifiedLayer.task(
+                    "qkv_projection",
+                    TransformerComputeKernelsQ8_0DP4A::fusedQKVMatmulQ8_0DP4A,
+                    context,
+                    state.workspace.wrapXbQuants,
+                    state.workspace.wrapXbScales,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapK,
+                    state.workspace.wrapV,
+                    weights.wqLayered[layerIndex].asByteArray(),
+                    weights.wkLayered[layerIndex].asByteArray(),
+                    weights.wvLayered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.dim(),
+                    config.kvDim(),
+                    PACKED_LOCAL);
+        } else {
+            unifiedLayer.task(
+                    "attn_rms_apply",
+                    TransformerComputeKernelsLayered::reductionOneBlock2WithLayer,
+                    context,
+                    state.workspace.wrapXb,
+                    state.workspace.wrapX,
+                    weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.temp);
 
-        // QKV Projection (fused with Q8 dequantization)
-        unifiedLayer.task(
-                "qkv_projection",
-                TransformerComputeKernelsLayered::fusedQKVMatmulQ8,
-                context,
-                state.workspace.wrapXb, // input (FP32)
-                state.workspace.wrapQ, // output Q
-                state.workspace.wrapK, // output K
-                state.workspace.wrapV, // output V
-                weights.wqLayered[layerIndex].asByteArray(), // Wq (Q8)
-                weights.wkLayered[layerIndex].asByteArray(), // Wk (Q8)
-                weights.wvLayered[layerIndex].asByteArray(), // Wv (Q8)
-                config.dim(), // dim
-                config.kvDim(), // kvDim
-                LOCAL_WORK_GROUP_SIZE_ALLOC);
+            // QKV Projection (fused with Q8 dequantization)
+            unifiedLayer.task(
+                    "qkv_projection",
+                    TransformerComputeKernelsLayered::fusedQKVMatmulQ8,
+                    context,
+                    state.workspace.wrapXb, // input (FP32)
+                    state.workspace.wrapQ, // output Q
+                    state.workspace.wrapK, // output K
+                    state.workspace.wrapV, // output V
+                    weights.wqLayered[layerIndex].asByteArray(), // Wq (Q8)
+                    weights.wkLayered[layerIndex].asByteArray(), // Wk (Q8)
+                    weights.wvLayered[layerIndex].asByteArray(), // Wv (Q8)
+                    config.dim(), // dim
+                    config.kvDim(), // kvDim
+                    LOCAL_WORK_GROUP_SIZE_ALLOC);
+        }
 
         // RoPE + KV Cache
         // Precomputed RoPE tables: the frequencies come from the model's own rope_theta (and
@@ -175,17 +213,34 @@ public class LlamaQ8_0FFNLayers
         // Attention
         configureAttention(unifiedLayer, layerIndex);
 
-        // Output Projection (Wo) with residual (Q8 dequantization)
-        unifiedLayer.task(
-                "attn_output_proj",
-                TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0Byte,
-                context,
-                state.workspace.wrapXb,
-                state.workspace.wrapX,
-                weights.woLayered[layerIndex].asByteArray(),
-                config.dim(),
-                config.dim(),
-                LOCAL_WORK_GROUP_SIZE_ALLOC);
+        // Output Projection (Wo) with residual
+        if (packed) {
+            // The attention output is a new activation: quantized fresh for the projection.
+            PackedActivationTasks.quantize(
+                    unifiedLayer, "attn_out_quantize", context, state.workspace, state.workspace.wrapXb);
+            unifiedLayer.task(
+                    "attn_output_proj",
+                    TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
+                    context,
+                    state.workspace.wrapXbQuants,
+                    state.workspace.wrapXbScales,
+                    state.workspace.wrapX,
+                    weights.woLayered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.dim(),
+                    PACKED_LOCAL);
+        } else {
+            unifiedLayer.task(
+                    "attn_output_proj",
+                    TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0Byte,
+                    context,
+                    state.workspace.wrapXb,
+                    state.workspace.wrapX,
+                    weights.woLayered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.dim(),
+                    LOCAL_WORK_GROUP_SIZE_ALLOC);
+        }
 
         // === FFN Block ===
         // RMS Normalization
@@ -209,31 +264,67 @@ public class LlamaQ8_0FFNLayers
                     config.rmsNormEps());
         }
 
-        // Fully fused: RMS apply + Gate/Up projections + SiLU + GLU (Q8 dequantization)
-        unifiedLayer.task(
-                "rms_ffn_gate_up",
-                TransformerComputeKernelsLayered::fullyFusedRmsNormFFNGateUpQ8,
-                context,
-                state.workspace.wrapX, // raw input (FP32)
-                state.workspace.wrapHb, // output
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(), // RMS weights
-                weights.w1Layered[layerIndex].asByteArray(), // W1 (Q8)
-                weights.w3Layered[layerIndex].asByteArray(), // W3 (Q8)
-                config.dim(), // input dimension
-                config.hiddenDim(), // output dimension
-                LOCAL_WORK_GROUP_SIZE_ALLOC);
+        if (packed) {
+            PackedActivationTasks.rmsApplyAndQuantize(
+                    unifiedLayer,
+                    "ffn_rms_apply",
+                    context,
+                    state.workspace,
+                    weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.tempFFN);
+            unifiedLayer.task(
+                    "ffn_gate_up",
+                    TransformerComputeKernelsQ8_0DP4A::fusedFFNGateUpSiLUQ8_0DP4A,
+                    context,
+                    state.workspace.wrapXbQuants,
+                    state.workspace.wrapXbScales,
+                    state.workspace.wrapHb,
+                    weights.w1Layered[layerIndex].asByteArray(),
+                    weights.w3Layered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.hiddenDim(),
+                    PACKED_LOCAL);
+            // SwiGLU's output, quantized fresh for the down projection.
+            PackedActivationTasks.quantize(
+                    unifiedLayer, "ffn_down_quantize", context, state.workspace, state.workspace.wrapHb);
+            unifiedLayer.task(
+                    "ffn_down_proj",
+                    TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
+                    context,
+                    state.workspace.wrapXbQuants,
+                    state.workspace.wrapXbScales,
+                    state.workspace.wrapX,
+                    weights.w2Layered[layerIndex].asByteArray(),
+                    config.hiddenDim(),
+                    config.dim(),
+                    PACKED_LOCAL);
+        } else {
+            // Fully fused: RMS apply + Gate/Up projections + SiLU + GLU (Q8 dequantization)
+            unifiedLayer.task(
+                    "rms_ffn_gate_up",
+                    TransformerComputeKernelsLayered::fullyFusedRmsNormFFNGateUpQ8,
+                    context,
+                    state.workspace.wrapX, // raw input (FP32)
+                    state.workspace.wrapHb, // output
+                    weights.rms_ffn_weightLayered[layerIndex].asFloatArray(), // RMS weights
+                    weights.w1Layered[layerIndex].asByteArray(), // W1 (Q8)
+                    weights.w3Layered[layerIndex].asByteArray(), // W3 (Q8)
+                    config.dim(), // input dimension
+                    config.hiddenDim(), // output dimension
+                    LOCAL_WORK_GROUP_SIZE_ALLOC);
 
-        // Down projection (W2) with residual (Q8 dequantization)
-        unifiedLayer.task(
-                "ffn_down_proj",
-                TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0Byte,
-                context,
-                state.workspace.wrapHb,
-                state.workspace.wrapX,
-                weights.w2Layered[layerIndex].asByteArray(),
-                config.hiddenDim(),
-                config.dim(),
-                LOCAL_WORK_GROUP_SIZE_ALLOC);
+            // Down projection (W2) with residual (Q8 dequantization)
+            unifiedLayer.task(
+                    "ffn_down_proj",
+                    TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0Byte,
+                    context,
+                    state.workspace.wrapHb,
+                    state.workspace.wrapX,
+                    weights.w2Layered[layerIndex].asByteArray(),
+                    config.hiddenDim(),
+                    config.dim(),
+                    LOCAL_WORK_GROUP_SIZE_ALLOC);
+        }
 
         // Keep activation X on device for next layer
         unifiedLayer.persistOnDevice(state.workspace.wrapX);
@@ -244,6 +335,9 @@ public class LlamaQ8_0FFNLayers
     protected String predecessorGraphName(int layerIndex) {
         return null;
     }
+
+    /** Lanes per output row of the packed projections: a multiple of 32. */
+    private static final int PACKED_LOCAL = 64;
 
     /** {@code objects} consumed from {@code source}, or from the previous graph when it is null. */
     protected static void consume(TaskGraph graph, String source, Object... objects) {
@@ -344,31 +438,57 @@ public class LlamaQ8_0FFNLayers
 
         WorkerGrid parallelAttentionWorker = attentionWorker();
 
+        boolean packed = PackedActivationTasks.enabled();
+        int qkvRows = config.dim() + 2 * config.kvDim();
+
         // === Per-Layer Grid Assignments (ordered by TaskGraph flow) ===
         for (int i = firstLayer; i < endLayer(config.numberOfLayers()); i++) {
+            String l = "layer_" + i + ".";
             // --- Attention Block ---
             // RMS Normalization
             tornadoForwardScheduler.addWorkerGrid(
                     "layer_" + i + ".attn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".attn_rms_apply", rmsNormWorker);
-            tornadoForwardScheduler.addWorkerGrid("layer_" + i + ".qkv_projection", fusedQkvWorker);
+            if (packed) {
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "qkv_projection",
+                        PackedActivationTasks.projectionWorker(qkvRows, PACKED_LOCAL));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attn_output_proj",
+                        PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "ffn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "ffn_gate_up",
+                        PackedActivationTasks.projectionWorker(config.hiddenDim(), PACKED_LOCAL));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "ffn_down_quantize",
+                        PackedActivationTasks.quantizeWorker(config.hiddenDim()));
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "ffn_down_proj",
+                        PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
+            } else {
+                tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_apply", rmsNormWorker);
+                tornadoForwardScheduler.addWorkerGrid(l + "qkv_projection", fusedQkvWorker);
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attn_output_proj", configDimRowMajorGlobalWorker);
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "rms_ffn_gate_up", configHiddenDimRowMajorWorker);
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "ffn_down_proj", configDimRowMajorGlobalWorker);
+            }
             tornadoForwardScheduler.addWorkerGrid(
                     "layer_" + i + ".rope_and_kv_cache", ropeWithCacheWorker);
             tornadoForwardScheduler.addWorkerGrid(
                     "layer_" + i + ".attention", parallelAttentionWorker);
             addAttentionCombineGrid(tornadoForwardScheduler, i);
-            tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".attn_output_proj", configDimRowMajorGlobalWorker);
             // --- FFN Block ---
             // RMS Normalization
             tornadoForwardScheduler.addWorkerGrid(
                     "layer_" + i + ".ffn_rms_reduce", rmsReduceWorker);
-            // Fused RMS + Gate/Up Projections
-            tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".rms_ffn_gate_up", configHiddenDimRowMajorWorker);
-            // Down Projection
-            tornadoForwardScheduler.addWorkerGrid(
-                    "layer_" + i + ".ffn_down_proj", configDimRowMajorGlobalWorker);
         }
 
         return tornadoForwardScheduler;
