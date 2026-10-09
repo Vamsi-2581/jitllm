@@ -338,9 +338,7 @@ public class Qwen35State extends State {
         // reads -- the feed-forward's hidden width -- and used as a prefix by the narrower ones,
         // so the three arrays serve every projection rather than one set per width.
         int widest = Math.max(config.dim(), config.hiddenDim());
-        workspace.wrapXbQuants = TornadoWorkspaces.ints(widest / 4);
-        workspace.wrapXbScales = TornadoWorkspaces.floats(widest / 32);
-        workspace.wrapXbSums = TornadoWorkspaces.ints(widest / 32);
+        TornadoWorkspaces.packedActivation(workspace, widest);
         workspace.wrapHb = TornadoWorkspaces.floats(config.hiddenDim());
         workspace.wrapHb2 = TornadoWorkspaces.floats(config.hiddenDim());
         workspace.wrapLogits = TornadoWorkspaces.floats(config.vocabularySize());

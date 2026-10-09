@@ -357,9 +357,7 @@ public final class Gemma4State extends State {
         // reads and used as a prefix by the narrower ones. This family's feed-forward width differs
         // by layer, so the widest is the maximum over layers rather than a single hiddenDim.
         int widest = Math.max(config.dim(), config.maxFeedForwardLength());
-        workspace.wrapXbQuants = TornadoWorkspaces.ints(widest / 4);
-        workspace.wrapXbScales = TornadoWorkspaces.floats(widest / 32);
-        workspace.wrapXbSums = TornadoWorkspaces.ints(widest / 32);
+        TornadoWorkspaces.packedActivation(workspace, widest);
 
         workspace.wrapAtt = TornadoWorkspaces.floats(nHead * config.contextLength());
         // Split-KV partials: per head, SPLIT_KV numerators of headDim, then SPLIT_KV maxima and

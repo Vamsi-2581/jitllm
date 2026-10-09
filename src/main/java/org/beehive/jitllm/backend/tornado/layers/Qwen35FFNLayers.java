@@ -1300,17 +1300,7 @@ public class Qwen35FFNLayers
      */
     // @formatter:on
     private static boolean dp4a() {
-        return TornadoDevices.target()
-                        .capabilities()
-                        .supports(
-                                org.beehive.jitllm.runtime.backend.DeviceCapability
-                                        .PACKED_INTEGER_DOT)
-                // The escape hatch is for the tests whose subject is addressing rather than
-                // arithmetic: they compare the device against the host exactly, which a
-                // quantized activation cannot do. Not a user option, and not a CLI flag.
-                && !"false"
-                        .equalsIgnoreCase(
-                                System.getProperty("jitllm.qwen35.packedIntegerDot", "true"));
+        return PackedActivationTasks.enabled();
     }
 
     /**

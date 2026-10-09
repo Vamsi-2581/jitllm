@@ -4,6 +4,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayer
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_0;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_0Packed;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_1;
+import org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.LlamaQ8_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
@@ -134,11 +135,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         }
         unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
         if (dp4a()) {
-            Object[] packed = {
-                state.workspace.wrapXbQuants,
-                state.workspace.wrapXbScales,
-                state.workspace.wrapXbSums
-            };
+            Object[] packed = PackedActivationTasks.buffers(state.workspace);
             if (layerIndex == firstLayer) {
                 unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, packed);
             } else {
@@ -361,25 +358,14 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
      */
     // @formatter:on
     private static boolean dp4a() {
-        return org.beehive.jitllm.backend.tornado.device.TornadoDevices.target()
-                .capabilities()
-                .supports(org.beehive.jitllm.runtime.backend.DeviceCapability.PACKED_INTEGER_DOT);
+        return PackedActivationTasks.supported();
     }
 
     /** The norm's apply; on the packed path it also quantizes its output for the projections. */
     private void rmsApply(TaskGraph graph, String name, FloatArray rmsWeights, FloatArray temp) {
         if (dp4a()) {
-            graph.task(
-                    name,
-                    TransformerComputeKernelsQ4_0::rmsApplyAndQuantizeActivationQ8Blocks,
-                    context,
-                    state.workspace.wrapXb,
-                    state.workspace.wrapX,
-                    rmsWeights,
-                    temp,
-                    state.workspace.wrapXbQuants,
-                    state.workspace.wrapXbScales,
-                    state.workspace.wrapXbSums);
+            PackedActivationTasks.rmsApplyAndQuantize(
+                    graph, name, context, state.workspace, rmsWeights, temp);
         } else {
             graph.task(
                     name,
@@ -393,14 +379,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
     }
 
     private void quantize(TaskGraph graph, String name, FloatArray activation) {
-        graph.task(
-                name,
-                TransformerComputeKernelsQ4_0::quantizeActivationQ8Blocks,
-                context,
-                activation,
-                state.workspace.wrapXbQuants,
-                state.workspace.wrapXbScales,
-                state.workspace.wrapXbSums);
+        PackedActivationTasks.quantize(graph, name, context, state.workspace, activation);
     }
 
     private void packedProjection(
@@ -479,7 +458,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
     }
 
     private static WorkerGrid packedWorker(int rows) {
-        return WorkerGridFactory.genericWorker(rows * PACKED_LOCAL, PACKED_LOCAL);
+        return PackedActivationTasks.projectionWorker(rows, PACKED_LOCAL);
     }
 
     /** The grid for a projection over {@code w}: a 16-row group per workgroup when it is packed. */
@@ -494,10 +473,6 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         return packedWorker(rows);
     }
 
-    /** One 32-lane workgroup per block of 32 activations. */
-    private static WorkerGrid quantizeWorker(int length) {
-        return WorkerGridFactory.genericWorker(length, 32);
-    }
 
     /**
      * The Q8_0 schedule plus a grid for {@code ffn_rms_apply}, and {@code ffn_gate_up} in place of
@@ -536,7 +511,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                 String layer = "layer_" + i + ".";
                 tornadoForwardScheduler.addWorkerGrid(layer + "attn_rms_reduce", rmsReduceWorker);
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "attn_rms_apply", quantizeWorker(config.dim()));
+                        layer + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "q_proj", packedWorker(config.dim(), weights.wqLayered[i], false));
                 tornadoForwardScheduler.addWorkerGrid(
@@ -550,18 +525,18 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                 tornadoForwardScheduler.addWorkerGrid(layer + "attention", parallelAttentionWorker);
                 addAttentionCombineGrid(tornadoForwardScheduler, i);
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "attn_out_quantize", quantizeWorker(config.dim()));
+                        layer + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "attn_output_proj",
                         packedWorker(config.dim(), weights.woLayered[i], false));
                 tornadoForwardScheduler.addWorkerGrid(layer + "ffn_rms_reduce", rmsReduceWorker);
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "ffn_rms_apply", quantizeWorker(config.dim()));
+                        layer + "ffn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "ffn_gate_up",
                         packedWorker(config.hiddenDim(), weights.w1Layered[i], true));
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "ffn_down_quantize", quantizeWorker(config.hiddenDim()));
+                        layer + "ffn_down_quantize", PackedActivationTasks.quantizeWorker(config.hiddenDim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "ffn_down_proj",
                         packedWorker(config.dim(), weights.w2Layered[i], false));

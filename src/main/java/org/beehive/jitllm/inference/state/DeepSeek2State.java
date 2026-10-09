@@ -223,9 +223,7 @@ public final class DeepSeek2State extends State {
                 Math.max(
                         Math.max(dim, config.hiddenDim()),
                         Math.max(config.attentionOutputInputDim(), config.qLoraRank()));
-        workspace.wrapXbQuants = TornadoWorkspaces.ints(widest / 4);
-        workspace.wrapXbScales = TornadoWorkspaces.floats(widest / 32);
-        workspace.wrapXbSums = TornadoWorkspaces.ints(widest / 32);
+        TornadoWorkspaces.packedActivation(workspace, widest);
         workspace.wrapHb = TornadoWorkspaces.floats(config.hiddenDim());
         workspace.wrapLogits = TornadoWorkspaces.floats(config.vocabularySize());
 

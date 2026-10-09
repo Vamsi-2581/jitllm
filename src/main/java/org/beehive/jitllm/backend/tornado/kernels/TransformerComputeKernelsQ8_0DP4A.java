@@ -78,30 +78,13 @@ public final class TransformerComputeKernelsQ8_0DP4A {
             int d,
             int localWorkGroupSize) {
         int rowId = context.groupIdx;
-        if (rowId >= d) {
-            return;
-        }
-        int localId = context.localIdx;
-        int warpCount = localWorkGroupSize / 32;
-        float[] warpSums = context.allocateFloatLocalArray(warpCount);
-
-        float partial = rowPartial(context, xQuants, xScales, w, n, rowId, localWorkGroupSize);
-        partial += context.simdShuffleDown(partial, 16);
-        partial += context.simdShuffleDown(partial, 8);
-        partial += context.simdShuffleDown(partial, 4);
-        partial += context.simdShuffleDown(partial, 2);
-        partial += context.simdShuffleDown(partial, 1);
-        if ((localId & 31) == 0) {
-            warpSums[localId >> 5] = partial;
-        }
-        context.localBarrier();
-
-        if (localId == 0) {
-            float total = 0.0f;
-            for (int warp = 0; warp < warpCount; warp++) {
-                total += warpSums[warp];
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < d) {
+            float total =
+                    rowDot(context, xQuants, xScales, w, n, rowId, localWorkGroupSize, warpSums);
+            if (context.localIdx == 0) {
+                output.set(rowId, total);
             }
-            output.set(rowId, total);
         }
     }
 
@@ -195,30 +178,13 @@ public final class TransformerComputeKernelsQ8_0DP4A {
             int d,
             int localWorkGroupSize) {
         int rowId = context.groupIdx;
-        if (rowId >= d) {
-            return;
-        }
-        int localId = context.localIdx;
-        int warpCount = localWorkGroupSize / 32;
-        float[] warpSums = context.allocateFloatLocalArray(warpCount);
-
-        float partial = rowPartial(context, xQuants, xScales, w, n, rowId, localWorkGroupSize);
-        partial += context.simdShuffleDown(partial, 16);
-        partial += context.simdShuffleDown(partial, 8);
-        partial += context.simdShuffleDown(partial, 4);
-        partial += context.simdShuffleDown(partial, 2);
-        partial += context.simdShuffleDown(partial, 1);
-        if ((localId & 31) == 0) {
-            warpSums[localId >> 5] = partial;
-        }
-        context.localBarrier();
-
-        if (localId == 0) {
-            float total = 0.0f;
-            for (int warp = 0; warp < warpCount; warp++) {
-                total += warpSums[warp];
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < d) {
+            float total =
+                    rowDot(context, xQuants, xScales, w, n, rowId, localWorkGroupSize, warpSums);
+            if (context.localIdx == 0) {
+                hb.set(rowId, hb.get(rowId) + total);
             }
-            hb.set(rowId, hb.get(rowId) + total);
         }
     }
 

@@ -80,9 +80,7 @@ public final class LlamaState extends State {
 
         // The packed-integer projections' quantized activation, sized for the widest one they read.
         int widest = Math.max(config.dim(), config.hiddenDim());
-        workspace.wrapXbQuants = TornadoWorkspaces.ints(widest / 4);
-        workspace.wrapXbScales = TornadoWorkspaces.floats(widest / 32);
-        workspace.wrapXbSums = TornadoWorkspaces.ints(widest / 32);
+        TornadoWorkspaces.packedActivation(workspace, widest);
 
         workspace.wrapXFP16 = TornadoWorkspaces.halfFloats(config.dim());
         workspace.wrapXbFP16 = TornadoWorkspaces.halfFloats(config.dim());

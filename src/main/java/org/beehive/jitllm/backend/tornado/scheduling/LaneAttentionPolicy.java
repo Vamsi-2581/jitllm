@@ -1,7 +1,14 @@
 package org.beehive.jitllm.backend.tornado.scheduling;
 
 import org.beehive.jitllm.backend.tornado.device.TornadoDevices;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.runtime.backend.DeviceCapability;
+import uk.ac.manchester.tornado.api.KernelContext;
+import uk.ac.manchester.tornado.api.WorkerGrid;
+import uk.ac.manchester.tornado.api.common.TornadoFunctions;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 // @formatter:off
 /**
@@ -13,17 +20,19 @@ import org.beehive.jitllm.runtime.backend.DeviceCapability;
  * so a backend that miscompiles the warp shuffle would compute a wrong answer, silently. OpenCL is
  * such a backend.
  *
- * <p>The shape half is not a preference at all but a hard precondition. The kernel assigns lane
- * {@code L} the head dimensions {@code 2L}, {@code 2L+1}, {@code 64+2L}, {@code 64+2L+1}, which is
- * a correct partition of exactly a 128-wide head across exactly 32 lanes. Anything else is not
- * slower, it is wrong, so the check is an equality and not a heuristic.
+ * <p>The shape half is not a preference at all but a hard precondition. There is one kernel per
+ * head width: the 128-wide one assigns lane {@code L} the head dimensions {@code 2L}, {@code 2L+1},
+ * {@code 64+2L}, {@code 64+2L+1}, the 64-wide one {@code 2L} and {@code 2L+1}, each a correct
+ * partition of exactly that width across exactly 32 lanes. Any other width is not slower, it is
+ * wrong, so the check is an equality and not a heuristic. This class is the one place that maps a
+ * head width to its kernel and its grid.
  *
  * <h2>Scope</h2>
  *
- * <p>Reached by the Qwen3 FP16 family's split-KV decode attention over an FP16 paged cache. Every
- * other family, every other quantisation, the FP32 key/value cache, the packed-half2 variant and
- * the non-split per-head kernel keep the kernel they had. Head widths other than 128 keep it too,
- * which is what leaves Llama-3.2-1B (64) and the Qwen3.5 family (256) exactly as they were.
+ * <p>Reached by split-KV decode attention over an FP16 paged cache in the Llama (Q4_0, Q8_0, FP16)
+ * and Qwen3 (Q8_0, FP16) families. The FP32 key/value cache, the packed-half2 variant and the
+ * non-split per-head kernel keep the kernels they had, as does the Qwen3.5 family (256-wide heads),
+ * which has its own single-warp kernel.
  *
  * <p>Measured on one device, an RTX 5070 Ti (sm_120). The decision is a backend-level default
  * rather than a per-device measurement, and what it rests on is structural rather than incidental:
@@ -33,9 +42,6 @@ import org.beehive.jitllm.runtime.backend.DeviceCapability;
  */
 // @formatter:on
 public final class LaneAttentionPolicy {
-
-    /** The only head width the lane-cooperative kernel is written for. */
-    public static final int SUPPORTED_HEAD_SIZE = 128;
 
     // @formatter:off
     /**
@@ -57,31 +63,60 @@ public final class LaneAttentionPolicy {
     public static final int WARPS_PER_GROUP = 16;
 
     /**
-     * Warps per (head, split) group for the 64-wide lane-cooperative kernel. A 64-wide head is half
-     * the work per key of a 128-wide one, so fewer warps keep the group busy.
+     * Warps per (head, split) for the 64-wide kernel. Half the work per key of a 128-wide head, so
+     * fewer warps keep the group busy: four measured fastest of two, four and eight on an A10
+     * (Llama-3.2-1B, tg128 at depths 0 and 680).
      */
-    public static final int HEAD64_WARPS_PER_GROUP =
-            Integer.getInteger("jitllm.attention.laneWarps", 4);
+    public static final int HEAD64_WARPS_PER_GROUP = 4;
+
+    /** The signature every lane-cooperative split-KV kernel shares. */
+    public interface Kernel
+            extends TornadoFunctions.Task15<
+                    KernelContext,
+                    FloatArray,
+                    HalfFloatArray,
+                    HalfFloatArray,
+                    FloatArray,
+                    Integer,
+                    Integer,
+                    Integer,
+                    Integer,
+                    IntArray,
+                    Integer,
+                    IntArray,
+                    Integer,
+                    Integer,
+                    Integer> {}
 
     private LaneAttentionPolicy() {}
 
-    /** Whether the 64-wide lane-cooperative kernel runs on the target device. */
-    public static boolean laneCooperativeAttentionHead64(int headSize) {
-        return headSize == 64
+    /**
+     * Whether a lane-cooperative kernel may be used for this head width on the active device.
+     *
+     * @param headSize the model's head width; anything but 64 or 128 is refused
+     */
+    public static boolean laneCooperativeAttention(int headSize) {
+        return (headSize == 64 || headSize == 128)
                 && TornadoDevices.target()
                         .capabilities()
                         .supports(DeviceCapability.SHUFFLE_REDUCED_FP16_GEMV);
     }
 
-    /**
-     * Whether the lane-cooperative kernel may be used for this head width on the active device.
-     *
-     * @param headSize the model's head width; anything but {@link #SUPPORTED_HEAD_SIZE} is refused
-     */
-    public static boolean laneCooperativeAttention(int headSize) {
-        return headSize == SUPPORTED_HEAD_SIZE
-                && TornadoDevices.target()
-                        .capabilities()
-                        .supports(DeviceCapability.SHUFFLE_REDUCED_FP16_GEMV);
+    /** The kernel for {@code headSize}, which {@link #laneCooperativeAttention} admitted. */
+    public static Kernel kernel(int headSize) {
+        return switch (headSize) {
+            case 64 -> TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64;
+            case 128 ->
+                    TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128;
+            default ->
+                    throw new IllegalArgumentException(
+                            "no lane-cooperative attention kernel for head width " + headSize);
+        };
+    }
+
+    /** The grid for {@code groups} (head, split) pairs of a {@code headSize}-wide head. */
+    public static WorkerGrid worker(int groups, int headSize) {
+        return WorkerGridFactory.createLaneAttentionWorker(
+                groups, headSize == 64 ? HEAD64_WARPS_PER_GROUP : WARPS_PER_GROUP);
     }
 }

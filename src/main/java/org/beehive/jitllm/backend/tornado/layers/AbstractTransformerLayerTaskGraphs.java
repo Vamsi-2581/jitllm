@@ -3,6 +3,7 @@ package org.beehive.jitllm.backend.tornado.layers;
 import java.util.List;
 import java.util.stream.IntStream;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
@@ -185,5 +186,16 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
      */
     protected boolean useFp16KVCache() {
         return state.usesFp16KeyValueCache() && schedulerType == SchedulerType.NVIDIA;
+    }
+
+    /**
+     * Whether split-KV decode attention runs the lane-cooperative kernel for {@code headSize}: an
+     * FP16 cache on the NVIDIA path, no request for the packed-half2 variant, and a head width
+     * {@link LaneAttentionPolicy} has a kernel for. The policy also picks that kernel and its grid.
+     */
+    protected boolean laneAttention(int headSize) {
+        return useFp16KVCache()
+                && !packedHalf2Attention
+                && LaneAttentionPolicy.laneCooperativeAttention(headSize);
     }
 }

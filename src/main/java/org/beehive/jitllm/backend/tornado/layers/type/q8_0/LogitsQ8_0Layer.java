@@ -135,20 +135,13 @@ public class LogitsQ8_0Layer extends AbstractLogitsTaskGraph {
      */
     // @formatter:on
     protected boolean packedVocabulary(TornadoWeights weights) {
-        return !"false"
-                        .equalsIgnoreCase(
-                                System.getProperty("jitllm.qwen35.packedIntegerDot", "true"))
+        return org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks.enabled()
                 && (weights.wclsByteArray.dataType()
                                 == org.beehive.jitllm.runtime.tensor.DataType.Q6_K
                         || weights.wclsByteArray.dataType()
                                 == org.beehive.jitllm.runtime.tensor.DataType.Q4_K
                         || packedQ8_0Vocabulary(weights))
-                && state.workspace.wrapXbQuants != null
-                && org.beehive.jitllm.backend.tornado.device.TornadoDevices.target()
-                        .capabilities()
-                        .supports(
-                                org.beehive.jitllm.runtime.backend.DeviceCapability
-                                        .PACKED_INTEGER_DOT);
+                && state.workspace.wrapXbQuants != null;
     }
 
     /**
@@ -188,15 +181,8 @@ public class LogitsQ8_0Layer extends AbstractLogitsTaskGraph {
             // nothing wrote. A family that overrides setupLogitsTaskGraph — Gemma 4 does, for its
             // logit soft-cap — would otherwise have to remember to bring the quantize with it, and
             // one that forgot would get plausible logits off uninitialized quants.
-            logits.task(
-                    "vocab_quantize",
-                    org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_0
-                            ::quantizeActivationQ8Blocks,
-                    context,
-                    state.workspace.wrapX,
-                    state.workspace.wrapXbQuants,
-                    state.workspace.wrapXbScales,
-                    state.workspace.wrapXbSums);
+            org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks.quantize(
+                    logits, "vocab_quantize", context, state.workspace, state.workspace.wrapX);
             if (packedQ8_0Vocabulary(weights)) {
                 logits.task(
                         "vocab_proj",
@@ -345,8 +331,8 @@ public class LogitsQ8_0Layer extends AbstractLogitsTaskGraph {
         if (weights instanceof TornadoWeights tornadoWeights && packedVocabulary(tornadoWeights)) {
             tornadoForwardScheduler.addWorkerGrid(
                     "logits.vocab_quantize",
-                    org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory.genericWorker(
-                            config.dim(), 32));
+                    org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks.quantizeWorker(
+                            config.dim()));
         }
         return tornadoForwardScheduler;
     }

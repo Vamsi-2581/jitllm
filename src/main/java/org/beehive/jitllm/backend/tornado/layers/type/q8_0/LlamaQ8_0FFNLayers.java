@@ -447,7 +447,9 @@ public class LlamaQ8_0FFNLayers
         if (partitions.isEmpty()) {
             // Split by default where the lane-cooperative kernel runs: one workgroup per head
             // leaves most of the device idle and walks the whole context serially.
-            return laneAttention() ? org.beehive.jitllm.inference.state.State.SPLIT_KV : 0;
+            return laneAttention(config.headSize())
+                    ? org.beehive.jitllm.inference.state.State.SPLIT_KV
+                    : 0;
         }
         int splits = partitions.getAsInt();
         if (splits > org.beehive.jitllm.inference.state.State.SPLIT_KV) {
@@ -462,22 +464,14 @@ public class LlamaQ8_0FFNLayers
         return splits;
     }
 
-    /** Whether split attention runs the 64-wide lane-cooperative kernel. */
-    protected boolean laneAttention() {
-        return useFp16KVCache()
-                && schedulerType == SchedulerType.NVIDIA
-                && LaneAttentionPolicy.laneCooperativeAttentionHead64(config.headSize());
-    }
-
     /**
      * The worker grid of the attention task: one workgroup per head, or per head and partition when
      * attention is split.
      */
     protected WorkerGrid attentionWorker() {
         int splits = attentionSplits();
-        if (splits > 0 && laneAttention()) {
-            return WorkerGridFactory.createLaneAttentionWorker(
-                    config.numberOfHeads() * splits, LaneAttentionPolicy.HEAD64_WARPS_PER_GROUP);
+        if (splits > 0 && laneAttention(config.headSize())) {
+            return LaneAttentionPolicy.worker(config.numberOfHeads() * splits, config.headSize());
         }
         return WorkerGridFactory.createAttentionWorker(
                 splits > 0 ? config.numberOfHeads() * splits : config.numberOfHeads(),
@@ -501,16 +495,17 @@ public class LlamaQ8_0FFNLayers
             // Flash-decoding: every head's positions are split across several workgroups, and a
             // combine pass merges their partial results. More workgroups than there are heads,
             // which is what keeps a GPU busy at short contexts.
-            unifiedLayer.task(
-                    "attention",
-                    laneAttention()
-                            ? TransformerPagedKvKernels
-                                    ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64
+            LaneAttentionPolicy.Kernel kernel =
+                    laneAttention(config.headSize())
+                            ? LaneAttentionPolicy.kernel(config.headSize())
                             : packedHalf2Attention
                                     ? TransformerPagedKvKernels
                                             ::processHeadsFlashAttentionSplitKVFP16PackedPaged
                                     : TransformerPagedKvKernels
-                                            ::processHeadsFlashAttentionSplitKVFP16Paged,
+                                            ::processHeadsFlashAttentionSplitKVFP16Paged;
+            unifiedLayer.task(
+                    "attention",
+                    kernel,
                     context,
                     state.workspace.wrapQ,
                     state.workspace.wrapKeyCacheFP16,

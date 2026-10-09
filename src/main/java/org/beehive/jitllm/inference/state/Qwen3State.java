@@ -109,9 +109,7 @@ public final class Qwen3State extends State {
                     Math.max(
                             Math.max(config.dim(), config.hiddenDim()),
                             nEmbdHeadK * config.numberOfHeads());
-            workspace.wrapXbQuants = TornadoWorkspaces.ints(widest / 4);
-            workspace.wrapXbScales = TornadoWorkspaces.floats(widest / 32);
-            workspace.wrapXbSums = TornadoWorkspaces.ints(widest / 32);
+            TornadoWorkspaces.packedActivation(workspace, widest);
         }
         workspace.wrapHb = TornadoWorkspaces.floats(config.hiddenDim());
         workspace.wrapHb2 = TornadoWorkspaces.floats(config.hiddenDim());

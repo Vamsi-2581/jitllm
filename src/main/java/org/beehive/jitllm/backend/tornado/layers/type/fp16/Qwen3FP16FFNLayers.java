@@ -109,11 +109,7 @@ public class Qwen3FP16FFNLayers
         this.nEmbdGqa = nEmbdVGqa;
         this.gqa = config.numberOfHeads() / config.numberOfKeyValueHeads();
         // FP16 paged split-KV only; the packed-half2 variant and the FP32 cache keep their kernels.
-        this.laneAttention =
-                useFp16KVCache()
-                        && !packedHalf2Attention
-                        && !isMetalBackend
-                        && LaneAttentionPolicy.laneCooperativeAttention(nEmbdHead);
+        this.laneAttention = !isMetalBackend && laneAttention(nEmbdHead);
         setupFFNLayers();
     }
 
@@ -165,9 +161,7 @@ public class Qwen3FP16FFNLayers
         // One warp per (head, split) for the lane-cooperative kernel; unused when it is not
         // selected, and deliberately a different shape from parallelAttentionWorker above.
         WorkerGrid laneAttentionWorker =
-                WorkerGridFactory.createLaneAttentionWorker(
-                        config.numberOfHeads() * attentionSplits,
-                        LaneAttentionPolicy.WARPS_PER_GROUP);
+                LaneAttentionPolicy.worker(config.numberOfHeads() * attentionSplits, nEmbdHead);
         // attn_output_proj worker (output projection)
         int matmul1Global = config.dim() * LOCAL_WORK_GROUP_SIZE_ALLOC;
         WorkerGrid matmul1Worker =
@@ -497,16 +491,17 @@ public class Qwen3FP16FFNLayers
             // Phase 1: split each head's KV range across attentionSplits workgroups; partials ->
             // wrapAttSplit.
             if (useFp16KVCache()) {
-                unifiedLayer.task(
-                        tp + attentionTaskName(),
+                LaneAttentionPolicy.Kernel kernel =
                         laneAttention
-                                ? TransformerPagedKvKernels
-                                        ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128
+                                ? LaneAttentionPolicy.kernel(nEmbdHead)
                                 : packedHalf2Attention
                                         ? TransformerPagedKvKernels
                                                 ::processHeadsFlashAttentionSplitKVFP16PackedPaged
                                         : TransformerPagedKvKernels
-                                                ::processHeadsFlashAttentionSplitKVFP16Paged,
+                                                ::processHeadsFlashAttentionSplitKVFP16Paged;
+                unifiedLayer.task(
+                        tp + attentionTaskName(),
+                        kernel,
                         context,
                         qwen3State.workspace.wrapQ, // query vectors
                         qwen3State.workspace.wrapKeyCacheFP16, // key cache (FP16)

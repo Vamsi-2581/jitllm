@@ -878,6 +878,36 @@ public class TransformerPagedKvKernels {
             lShared[warp] = l;
         }
         context.localBarrier();
+        foldLaneWarps(context, partial, mShared, lShared, att, headSize, HEAD, nSplits, h, s);
+    }
+
+    // @formatter:off
+    /**
+     * The end of a lane-cooperative split: folds the warps' partial numerators, maxima and sums of
+     * split {@code s} of head {@code h} into {@code att}, in the compact layout {@code
+     * combineSplitKVAttention} reads (per head {@code nSplits * headSize} numerators, then {@code
+     * nSplits} maxima, then {@code nSplits} sums).
+     *
+     * <p>Every warp has written its row of {@code partial} (rows {@code rowStride} apart) and, from
+     * lane zero, its maximum and sum, and the group has passed a barrier. A warp that received no
+     * keys holds {@code -inf}, which the fold weights zero, so an empty split writes numerator 0,
+     * {@code M = -inf} and {@code L = 0}.
+     */
+    // @formatter:on
+    private static void foldLaneWarps(
+            KernelContext context,
+            float[] partial,
+            float[] mShared,
+            float[] lShared,
+            FloatArray att,
+            int headSize,
+            int rowStride,
+            int nSplits,
+            int h,
+            int s) {
+        int tid = context.localIdx;
+        int blockSize = context.localGroupSizeX;
+        int nWarps = blockSize >> 5;
 
         int headBase = h * nSplits * (headSize + 2);
         int outBase = headBase + s * headSize;
@@ -903,7 +933,7 @@ public class TransformerPagedKvKernels {
             for (int w = 0; w < nWarps; w++) {
                 float mw = mShared[w];
                 float f = (mw == Float.NEGATIVE_INFINITY) ? 0.0f : TornadoMath.exp(mw - blockMax);
-                sum += f * partial[w * HEAD + d];
+                sum += f * partial[w * rowStride + d];
             }
             att.set(outBase + d, sum);
         }
@@ -921,8 +951,7 @@ public class TransformerPagedKvKernels {
      * {@code L} owns dimensions {@code 2L} and {@code 2L+1}, so one warp's 32 {@code Half2} loads
      * cover a whole key or value row in one 128-byte transaction, and the accumulator is two FP32
      * scalars per lane. A warp owns a strided subset of one split's keys; the warps of a group are
-     * folded together in shared memory after the loop. The partial-output layout is the one
-     * {@code combineSplitKVAttention} reads.
+     * folded together by {@link #foldLaneWarps}.
      *
      * <p>Requires {@code headSize == 64} and a workgroup that is a whole number of warps, at most
      * {@code MAX_WARPS}. The caller checks both.
@@ -1019,40 +1048,7 @@ public class TransformerPagedKvKernels {
                 lShared[warp] = l;
             }
             context.localBarrier();
-
-            int headBase = h * nSplits * (headSize + 2);
-            int outBase = headBase + s * headSize;
-            int mBase = headBase + nSplits * headSize;
-            int lBase = mBase + nSplits;
-
-            float blockMax = Float.NEGATIVE_INFINITY;
-            for (int w = 0; w < nWarps; w++) {
-                float mw = mShared[w];
-                if (mw > blockMax) {
-                    blockMax = mw;
-                }
-            }
-            float denom = 0.0f;
-            for (int w = 0; w < nWarps; w++) {
-                float mw = mShared[w];
-                float f = (mw == Float.NEGATIVE_INFINITY) ? 0.0f : TornadoMath.exp(mw - blockMax);
-                denom += f * lShared[w];
-            }
-
-            for (int i = tid; i < headSize; i += blockSize) {
-                float sum = 0.0f;
-                for (int w = 0; w < nWarps; w++) {
-                    float mw = mShared[w];
-                    float f =
-                            (mw == Float.NEGATIVE_INFINITY) ? 0.0f : TornadoMath.exp(mw - blockMax);
-                    sum += f * partial[w * HEAD + i];
-                }
-                att.set(outBase + i, sum);
-            }
-            if (tid == 0) {
-                att.set(mBase + s, blockMax);
-                att.set(lBase + s, denom);
-            }
+            foldLaneWarps(context, partial, mShared, lShared, att, headSize, HEAD, nSplits, h, s);
         }
     }
 
