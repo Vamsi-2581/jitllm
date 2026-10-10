@@ -64,7 +64,11 @@ public final class GraniteState extends State {
 
         switch (config.quantization()) {
             case "FP16" -> TornadoWorkspaces.activationFP16(workspace, config.dim());
-            case "Q8_0" -> TornadoWorkspaces.activationQ8_0(workspace, config.dim());
+            case "Q8_0" -> {
+                TornadoWorkspaces.activationQ8_0(workspace, config.dim());
+                TornadoWorkspaces.packedActivation(
+                        workspace, Math.max(config.dim(), config.hiddenDim()));
+            }
             default ->
                     throw new UnsupportedOperationException(
                             "Unsupported quantization format: " + config.quantization());

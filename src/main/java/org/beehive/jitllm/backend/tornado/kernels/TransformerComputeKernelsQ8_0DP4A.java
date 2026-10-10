@@ -189,6 +189,32 @@ public final class TransformerComputeKernelsQ8_0DP4A {
     }
 
     /**
+     * {@code hb[row] += residualScale * (w[row]·x)}, the activation quantized: the residual
+     * connection of a family that scales the branch before adding it (Granite's residual
+     * multiplier).
+     */
+    public static void matrixVectorGenericWithScaledResidualQ8_0DP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            FloatArray hb,
+            ByteArray w,
+            int n,
+            int d,
+            int localWorkGroupSize,
+            float residualScale) {
+        int rowId = context.groupIdx;
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < d) {
+            float total =
+                    rowDot(context, xQuants, xScales, w, n, rowId, localWorkGroupSize, warpSums);
+            if (context.localIdx == 0) {
+                hb.set(rowId, hb.get(rowId) + residualScale * total);
+            }
+        }
+    }
+
+    /**
      * {@code hb[row] = silu(w1[row]·x) * (w3[row]·x)}, both projections against the same quantized
      * activation. SiLU is applied to the gate reduced across every warp, never per warp.
      */
