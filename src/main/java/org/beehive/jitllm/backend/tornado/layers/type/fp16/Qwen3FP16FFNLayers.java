@@ -680,6 +680,17 @@ public class Qwen3FP16FFNLayers
     // @formatter:on
 
     /**
+     * Layers per graph, single-token and batched decode alike: the count measured for the decode
+     * graphs, {@link
+     * org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.Qwen3FP16FFNLayersDecode#LAYERS_PER_GRAPH}.
+     */
+    @Override
+    protected int layersPerGraph() {
+        return org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.Qwen3FP16FFNLayersDecode
+                .LAYERS_PER_GRAPH;
+    }
+
+    /**
      * Returns the explicit predecessor graph name for consumeFromDevice.
      *
      * <p>The single-token plan receives {@code wrapX} (and relays all persisted buffers, including
