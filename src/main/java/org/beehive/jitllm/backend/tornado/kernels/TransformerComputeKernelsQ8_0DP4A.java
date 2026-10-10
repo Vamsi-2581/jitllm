@@ -167,6 +167,72 @@ public final class TransformerComputeKernelsQ8_0DP4A {
         }
     }
 
+    /**
+     * The Q, K and V projections of one quantized activation from a single combined weight, rows
+     * {@code [0, qDim)} Q, the next {@code kvDim} K and the last {@code kvDim} V (Phi-3's
+     * {@code wqkv}).
+     *
+     * <p>Worker: {@code (qDim + 2 kvDim) * localWorkGroupSize} lanes, local {@code
+     * localWorkGroupSize}, a multiple of 32.
+     */
+    public static void combinedQKVMatmulQ8_0DP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            FloatArray q,
+            FloatArray k,
+            FloatArray v,
+            ByteArray wqkv,
+            int n,
+            int qDim,
+            int kvDim,
+            int localWorkGroupSize) {
+        int rowId = context.groupIdx;
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < qDim + 2 * kvDim) {
+            float total =
+                    rowDot(context, xQuants, xScales, wqkv, n, rowId, localWorkGroupSize, warpSums);
+            if (context.localIdx == 0) {
+                if (rowId < qDim) {
+                    q.set(rowId, total);
+                } else if (rowId < qDim + kvDim) {
+                    k.set(rowId - qDim, total);
+                } else {
+                    v.set(rowId - qDim - kvDim, total);
+                }
+            }
+        }
+    }
+
+    /**
+     * {@code hb[row] = silu(wUp[row]·x) * (wUp[d + row]·x)} from a single combined gate/up weight,
+     * gate rows first (Phi-3's {@code w_up}). The two reductions use separate scratch, so neither
+     * overwrites the other's partials while they are read.
+     */
+    public static void combinedFFNGateUpSiLUQ8_0DP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            FloatArray hb,
+            ByteArray wUp,
+            int n,
+            int d,
+            int localWorkGroupSize) {
+        int rowId = context.groupIdx;
+        float[] gateSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        float[] upSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < d) {
+            float gate =
+                    rowDot(context, xQuants, xScales, wUp, n, rowId, localWorkGroupSize, gateSums);
+            float up =
+                    rowDot(context, xQuants, xScales, wUp, n, d + rowId, localWorkGroupSize, upSums);
+            if (context.localIdx == 0) {
+                float silu = gate / (1.0f + TornadoMath.exp(-gate));
+                hb.set(rowId, silu * up);
+            }
+        }
+    }
+
     /** {@code hb[row] += w[row]·x}, the activation quantized. */
     public static void matrixVectorGenericWithResidualQ8_0DP4A(
             KernelContext context,

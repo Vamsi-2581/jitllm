@@ -1,10 +1,10 @@
 package org.beehive.jitllm.backend.tornado.plan.components.q8_0;
 
 import org.beehive.jitllm.backend.tornado.layers.AbstractLogitsTaskGraph;
+import org.beehive.jitllm.backend.tornado.layers.PackedQ8_0LogitsLayer;
 import org.beehive.jitllm.backend.tornado.layers.Activation;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
-import org.beehive.jitllm.backend.tornado.layers.type.q8_0.LogitsQ8_0Layer;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.Phi3Q8_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
@@ -40,7 +40,7 @@ public class Phi3Q8_0PlanComponents implements SingleTokenForwardPlanComponents 
 
     @Override
     public AbstractLogitsTaskGraph singleTokenLogits(String previousGraphId) {
-        return new LogitsQ8_0Layer(
+        return new PackedQ8_0LogitsLayer(
                 "logits", state, weights, config, previousGraphId, schedulerType);
     }
 }
