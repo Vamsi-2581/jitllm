@@ -842,27 +842,6 @@ public class Qwen35FFNLayers
 
     // ── the layer graphs ──────────────────────────────────────────────────────
 
-    // @formatter:off
-    /**
-     * The prefix the tasks of {@code layerIndex} carry inside their graph.
-     *
-     * <p>Empty while a layer owns its graph, which is every family's default: the graph name
-     * already separates one layer's {@code attn_rms_reduce} from the next one's. A family that puts
-     * more than one layer in a graph must return something distinct per layer, because grid keys
-     * are {@code graphName.taskName} and two layers would otherwise collide on every task.
-     */
-    // @formatter:on
-    protected String layerTaskPrefix(int layerIndex) {
-        return "";
-    }
-
-    /**
-     * The graph {@code layerIndex}'s tasks belong to. One per layer unless a family groups them.
-     */
-    protected String layerGraphName(int layerIndex) {
-        return "layer_" + layerIndex;
-    }
-
     /**
      * Whether {@code layerIndex} is the first layer of its graph, and so owns the graph's inputs.
      */
@@ -888,6 +867,12 @@ public class Qwen35FFNLayers
     @Override
     protected TaskGraph createFFNLayerTaskGraph(int layerIndex) {
         return appendLayer(new TaskGraph(layerGraphName(layerIndex)), layerIndex);
+    }
+
+    @Override
+    protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
+        return appendLayer(
+                existing != null ? existing : new TaskGraph(layerGraphName(layerIndex)), layerIndex);
     }
 
     // @formatter:off

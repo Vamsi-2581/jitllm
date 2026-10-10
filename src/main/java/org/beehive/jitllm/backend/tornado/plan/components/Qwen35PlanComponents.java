@@ -62,16 +62,8 @@ public class Qwen35PlanComponents
 
     @Override
     public TransformerLayerTaskGraphs singleTokenTransformerLayers() {
-        return new Qwen35FFNLayers(
-                "qwen35FFN",
-                state,
-                weights,
-                config,
-                schedulerType,
-                "activationUpdate",
-                0,
-                config.numberOfLayers(),
-                feedForward());
+        // The whole model as one stage: several layers to a graph, as in the pipeline stages.
+        return singleTokenTransformerLayers(0, config.numberOfLayers());
     }
 
     @Override

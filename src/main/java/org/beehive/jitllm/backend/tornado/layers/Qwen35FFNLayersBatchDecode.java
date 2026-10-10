@@ -1,12 +1,9 @@
 package org.beehive.jitllm.backend.tornado.layers;
 
-import java.util.ArrayList;
-import java.util.List;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.inference.state.Qwen35State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen35TornadoWeights;
 import org.beehive.jitllm.model.qwen35.Qwen35Configuration;
-import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 
@@ -91,54 +88,9 @@ public class Qwen35FFNLayersBatchDecode extends Qwen35FFNLayers {
     private static final int LAYERS_PER_GRAPH = Qwen35FFNLayersGrouped.LAYERS_PER_GRAPH;
 
     /** How many layers this family puts in one decode graph. Read by the topology tests. */
+    @Override
     protected int layersPerGraph() {
         return LAYERS_PER_GRAPH;
-    }
-
-    // @formatter:off
-    /**
-     * One graph per group of layers, in order, with a smaller graph for any remainder.
-     *
-     * <p>Overrides the one-graph-per-layer construction rather than generalising it: the grouping
-     * is this family's, and every other family keeps the loop it had.
-     */
-    // @formatter:on
-    @Override
-    protected void setupFFNLayers() {
-        int layers = endLayer(config.numberOfLayers());
-        List<ImmutableTaskGraph> graphs = new ArrayList<>();
-        for (int first = firstLayer; first < layers; first += LAYERS_PER_GRAPH) {
-            TaskGraph graph = new TaskGraph(layerGraphName(first));
-            int last = Math.min(first + LAYERS_PER_GRAPH, layers) - 1;
-            for (int layer = first; layer <= last; layer++) {
-                appendLayer(graph, layer);
-            }
-            lastFFNLayerTaskGraphID = graph.getTaskGraphName();
-            graphs.add(graph.snapshot());
-        }
-        ffnLayerITGs = List.copyOf(graphs);
-    }
-
-    /** The graph holding {@code layerIndex}: named for the first layer in it. */
-    @Override
-    protected String layerGraphName(int layerIndex) {
-        int offset = layerIndex - firstLayer;
-        return "layer_" + (firstLayer + offset - offset % LAYERS_PER_GRAPH);
-    }
-
-    // @formatter:off
-    /**
-     * What keeps a graph's layers' tasks apart inside it.
-     *
-     * <p>Grid keys are {@code graphName.taskName}, so without this every layer in a graph would
-     * claim {@code layer_0.attn_rms_reduce}. The first layer of a graph keeps the bare names the
-     * ungrouped family used, so only the later slots' keys are new.
-     */
-    // @formatter:on
-    @Override
-    protected String layerTaskPrefix(int layerIndex) {
-        int slot = (layerIndex - firstLayer) % LAYERS_PER_GRAPH;
-        return slot == 0 ? "" : "l" + slot + "_";
     }
 
     /** The batch-prefill graph for the same block already uploaded these weights. */
