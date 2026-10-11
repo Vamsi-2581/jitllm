@@ -1,12 +1,16 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q8_0;
 
+import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ8_0DP4A;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks;
 import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
+import org.beehive.jitllm.backend.tornado.scheduling.RmsReductionPolicy;
+import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
+import org.beehive.jitllm.backend.tornado.scheduling.SplitKvAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
@@ -44,6 +48,60 @@ public class LlamaQ8_0FFNLayers
         super(taskGraphName, state, weights, config, schedulerType);
         restrictToLayers(firstLayer, endLayer);
         setupFFNLayers();
+    }
+
+    /**
+     * Whether the projections run the SIMD-group (32-lane shuffle) Q8_0 kernels, which also fuse
+     * the attention RMS apply into the QKV projection. Gated on the same verified capability the
+     * FP16 sibling uses, so CUDA and OpenCL keep their kernels. The packed DP4A projections, where
+     * enabled, come first.
+     */
+    protected final boolean useSimd32Reduction =
+            SchedulerDetectionService.isSubgroupShuffle32Supported();
+
+    /** Without a separate finalize task on Metal; see {@link RmsReductionPolicy}. */
+    @Override
+    protected boolean shouldUseFinalNormalization() {
+        return super.shouldUseFinalNormalization() && !RmsReductionPolicy.singleWorkgroup();
+    }
+
+    /**
+     * Binds the split-KV partial-output scratch, which the split kernel writes and the combine pass
+     * reads. Uploaded once by the stage's first layer and passed along the graph chain; called by
+     * the graph that opens a group, so subclasses that replace {@link #configureLayerDataTransfers}
+     * keep it.
+     */
+    protected void bindAttentionScratch(TaskGraph unifiedLayer, int layerIndex) {
+        if (attentionSplits() == 0) {
+            return;
+        }
+        if (layerIndex == firstLayer) {
+            unifiedLayer.transferToDevice(
+                    DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
+        } else {
+            consume(unifiedLayer, predecessorGraphName(layerIndex), state.workspace.wrapAttSplit);
+        }
+    }
+
+    /**
+     * Registers the attention tasks' worker grids for layer {@code layerIndex}, matching the kernel
+     * {@link #configureAttention} installs.
+     */
+    protected void addAttentionWorkerGrids(GridScheduler scheduler, int layerIndex) {
+        scheduler.addWorkerGrid(
+                layerGraphName(layerIndex) + "." + layerTaskPrefix(layerIndex) + "attention",
+                attentionWorker());
+        addAttentionCombineGrid(scheduler, layerIndex);
+    }
+
+    /**
+     * Whether the FP32-cache split-KV attention runs the lane-cooperative kernel for this head
+     * width (Metal); the FP16-cache lane kernels are chosen by {@code laneAttention(headSize)}.
+     */
+    private boolean fp32LaneAttention() {
+        return !useFp16KVCache()
+                && SplitKvAttentionPolicy.narrow()
+                && LaneAttentionPolicy.laneCooperativeAttentionFp32CacheAnyHead(config.headSize());
     }
 
     // @formatter:off
@@ -130,6 +188,7 @@ public class LlamaQ8_0FFNLayers
         boolean packed = PackedActivationTasks.enabled();
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+            bindAttentionScratch(unifiedLayer, layerIndex);
             if (packed) {
                 Object[] buffers = PackedActivationTasks.buffers(state.workspace);
                 if (layerIndex == firstLayer) {
@@ -187,6 +246,25 @@ public class LlamaQ8_0FFNLayers
                     config.dim(),
                     config.kvDim(),
                     PACKED_LOCAL);
+        } else if (useSimd32Reduction) {
+            // RMS apply fused into the QKV projection.
+            unifiedLayer.task(
+                    tp + "qkv_projection",
+                    Qwen3Kernels::fusedRmsNormQKVMatmulQ8_0Warp,
+                    context,
+                    state.workspace.wrapX,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapK,
+                    state.workspace.wrapV,
+                    weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.temp,
+                    weights.wqLayered[layerIndex].asByteArray(),
+                    weights.wkLayered[layerIndex].asByteArray(),
+                    weights.wvLayered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.dim(),
+                    config.kvDim(),
+                    LOCAL_WORK_GROUP_SIZE_ALLOC);
         } else {
             unifiedLayer.task(
                     tp + "attn_rms_apply",
@@ -244,6 +322,16 @@ public class LlamaQ8_0FFNLayers
                     config.dim(),
                     config.dim(),
                     PACKED_LOCAL);
+        } else if (useSimd32Reduction) {
+            unifiedLayer.task(
+                    tp + "attn_output_proj",
+                    TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0ByteSimd32,
+                    context,
+                    state.workspace.wrapXb,
+                    state.workspace.wrapX,
+                    weights.woLayered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.dim());
         } else {
             unifiedLayer.task(
                     tp + "attn_output_proj",
@@ -317,6 +405,30 @@ public class LlamaQ8_0FFNLayers
                     config.hiddenDim(),
                     config.dim(),
                     PACKED_LOCAL);
+        } else if (useSimd32Reduction) {
+            // Fully fused: RMS apply + Gate/Up projections + SiLU + GLU, SIMD-group reductions.
+            unifiedLayer.task(
+                    tp + "rms_ffn_gate_up",
+                    TransformerComputeKernelsLayered::fusedRmsNormFFNGateUpQ8_0Warp,
+                    context,
+                    state.workspace.wrapX,
+                    state.workspace.wrapHb,
+                    weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.tempFFN,
+                    weights.w1Layered[layerIndex].asByteArray(),
+                    weights.w3Layered[layerIndex].asByteArray(),
+                    config.dim(),
+                    config.hiddenDim(),
+                    LOCAL_WORK_GROUP_SIZE_ALLOC);
+            unifiedLayer.task(
+                    tp + "ffn_down_proj",
+                    TransformerComputeKernelsLayered::matrixVectorGenericWithResidualQ8_0ByteSimd32,
+                    context,
+                    state.workspace.wrapHb,
+                    state.workspace.wrapX,
+                    weights.w2Layered[layerIndex].asByteArray(),
+                    config.hiddenDim(),
+                    config.dim());
         } else {
             // Fully fused: RMS apply + Gate/Up projections + SiLU + GLU (Q8 dequantization)
             unifiedLayer.task(
@@ -413,10 +525,6 @@ public class LlamaQ8_0FFNLayers
             // the kernels reading a mapping that no longer exists, silently.
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
-            if (attentionSplits() > 0) {
-                unifiedLayer.transferToDevice(
-                        DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
-            }
         } else {
             // Subsequent layers: Consume data already on device from previous layer. Named when
             // the layer names its producer: a graph that consumes anything by name gets nothing
@@ -440,9 +548,6 @@ public class LlamaQ8_0FFNLayers
                     weights.freq_cis_realFlat.asFloatArray(),
                     weights.freq_cis_imagFlat.asFloatArray());
             consume(unifiedLayer, pred, state.workspace.wrapBlockTable);
-            if (attentionSplits() > 0) {
-                consume(unifiedLayer, pred, state.workspace.wrapAttSplit);
-            }
         }
         return unifiedLayer;
     }
@@ -470,8 +575,6 @@ public class LlamaQ8_0FFNLayers
                 WorkerGridFactory.genericWorker(fusedQkvGlobal, LOCAL_WORK_GROUP_SIZE_ALLOC);
 
         WorkerGrid ropeWithCacheWorker = WorkerGridFactory.genericWorker(config.dim() / 2, 512);
-
-        WorkerGrid parallelAttentionWorker = attentionWorker();
 
         boolean packed = PackedActivationTasks.enabled();
         int qkvRows = config.dim() + 2 * config.kvDim();
@@ -506,7 +609,9 @@ public class LlamaQ8_0FFNLayers
                         l + "ffn_down_proj",
                         PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
             } else {
-                tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_apply", rmsNormWorker);
+                if (!useSimd32Reduction) {
+                    tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_apply", rmsNormWorker);
+                }
                 tornadoForwardScheduler.addWorkerGrid(l + "qkv_projection", fusedQkvWorker);
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_output_proj", configDimRowMajorGlobalWorker);
@@ -516,8 +621,7 @@ public class LlamaQ8_0FFNLayers
                         l + "ffn_down_proj", configDimRowMajorGlobalWorker);
             }
             tornadoForwardScheduler.addWorkerGrid(l + "rope_and_kv_cache", ropeWithCacheWorker);
-            tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
-            addAttentionCombineGrid(tornadoForwardScheduler, i);
+            addAttentionWorkerGrids(tornadoForwardScheduler, i);
             // --- FFN Block ---
             // RMS Normalization
             tornadoForwardScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
@@ -588,13 +692,21 @@ public class LlamaQ8_0FFNLayers
     }
 
     /**
-     * Split-KV partitions per head for attention, or 0 for one workgroup per head. Asked for with
-     * {@code -Djitllm.attention.splitKv=true} (and {@code .count}); taken on the NVIDIA path with
-     * an FP16 cache, where the split kernels exist.
+     * Split-KV partitions per head for attention, or 0 for one workgroup per head. With an FP32
+     * cache, split only where the 32-thread split kernel runs (Metal; see {@link
+     * SplitKvAttentionPolicy}). With an FP16 cache, asked for with {@code
+     * -Djitllm.attention.splitKv=true} (and {@code .count}), or taken by default on the NVIDIA path
+     * where the lane-cooperative kernel runs.
      */
     protected int attentionSplits() {
+        if (!useFp16KVCache()) {
+            return SplitKvAttentionPolicy.narrow()
+                    ? SplitKvAttentionPolicy.splits(
+                            org.beehive.jitllm.inference.state.State.SPLIT_KV)
+                    : 0;
+        }
         var partitions = state.executionPolicy().splitKvPartitions();
-        if (!useFp16KVCache() || schedulerType != SchedulerType.NVIDIA) {
+        if (schedulerType != SchedulerType.NVIDIA) {
             return 0;
         }
         if (partitions.isEmpty()) {
@@ -623,6 +735,14 @@ public class LlamaQ8_0FFNLayers
      */
     protected WorkerGrid attentionWorker() {
         int splits = attentionSplits();
+        if (splits > 0 && !useFp16KVCache()) {
+            return fp32LaneAttention()
+                    ? WorkerGridFactory.createLaneAttentionWorker(
+                            config.numberOfHeads() * splits, LaneAttentionPolicy.WARPS_PER_GROUP)
+                    : WorkerGridFactory.genericWorker(
+                            config.numberOfHeads() * splits * SplitKvAttentionPolicy.NARROW_GROUP,
+                            SplitKvAttentionPolicy.NARROW_GROUP);
+        }
         if (splits > 0 && laneAttention(config.headSize())) {
             return LaneAttentionPolicy.worker(config.numberOfHeads() * splits, config.headSize());
         }
@@ -645,6 +765,42 @@ public class LlamaQ8_0FFNLayers
     protected TaskGraph configureAttention(TaskGraph unifiedLayer, int layerIndex) {
         String tp = layerTaskPrefix(layerIndex);
         int splits = attentionSplits();
+        if (splits > 0 && !useFp16KVCache()) {
+            // Split-KV over the FP32 cache, where the 32-thread kernel runs (Metal).
+            unifiedLayer.task(
+                    tp + "attention",
+                    fp32LaneAttention()
+                            ? config.headSize() == LaneAttentionPolicy.NARROW_HEAD_SIZE
+                                    ? TransformerPagedKvKernels
+                                            ::processHeadsFlashAttentionSplitKVPagedLaneHead64
+                                    : TransformerPagedKvKernels
+                                            ::processHeadsFlashAttentionSplitKVPagedLaneHead128
+                            : TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVPaged32,
+                    context,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapKeyCache,
+                    state.workspace.wrapValueCache,
+                    state.workspace.wrapAttSplit,
+                    config.numberOfHeads(),
+                    config.headSize(),
+                    config.kvDim(),
+                    config.kvMul(),
+                    state.workspace.positionHolder,
+                    keyValueLayer(layerIndex),
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    splits);
+            return unifiedLayer.task(
+                    tp + "attention_combine",
+                    TransformerComputeKernelsLayered::combineSplitKVAttention,
+                    context,
+                    state.workspace.wrapAttSplit,
+                    state.workspace.wrapXb,
+                    config.numberOfHeads(),
+                    config.headSize(),
+                    splits);
+        }
         if (splits > 0) {
             // Flash-decoding: every head's positions are split across several workgroups, and a
             // combine pass merges their partial results. More workgroups than there are heads,

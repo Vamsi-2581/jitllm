@@ -49,14 +49,12 @@ public class SchedulerDetectionService {
     }
 
     /**
-     * Whether the multi-workgroup split-KV flash-decoding attention kernel ({@code
-     * processHeadsFlashAttentionSplitKV}) fails to JIT — true on Metal, where Qwen3 layers fall
-     * back to the single-workgroup-per-head online-softmax kernel.
-     *
-     * <p>Kept under its old name because ~10 call sites read it as a flag; what it now asks is the
-     * capability rather than the backend's identity.
+     * Whether the device lacks the multi-workgroup split-KV flash-decoding attention kernels, in
+     * which case Qwen3 layers fall back to the single-workgroup-per-head online-softmax kernel.
+     * Every backend grants {@link DeviceCapability#SPLIT_KV_ATTENTION} today; Metal runs the
+     * 32-thread kernel that {@link SplitKvAttentionPolicy} selects.
      */
-    public static boolean isMetalBackend() {
+    public static boolean lacksSplitKvAttention() {
         return !TornadoDevices.target()
                 .capabilities()
                 .supports(DeviceCapability.SPLIT_KV_ATTENTION);

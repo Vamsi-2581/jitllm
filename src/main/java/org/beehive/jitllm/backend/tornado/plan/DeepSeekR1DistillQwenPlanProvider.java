@@ -31,7 +31,7 @@ public final class DeepSeekR1DistillQwenPlanProvider implements TornadoPlanProvi
 
     @Override
     public Set<ExecutionMode> supportedModes() {
-        return TornadoSupportSets.STANDARD_ONLY;
+        return TornadoSupportSets.STANDARD_AND_BATCH;
     }
 
     @Override

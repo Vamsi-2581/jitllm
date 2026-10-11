@@ -69,10 +69,6 @@ public class LlamaQ4_0FFNLayersDecode extends LlamaQ4_0FFNLayers {
                     weights.freq_cis_imagFlat.asFloatArray());
             layer.consumeFromDevice(cacheSource(), keyCache(), valueCache());
             layer.consumeFromDevice(cacheSource(), state.workspace.wrapBlockTable);
-            if (attentionSplits() > 0) {
-                layer.transferToDevice(
-                        DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
-            }
         } else {
             String pred = layerGraphName(layerIndex - 1);
             layer.consumeFromDevice(
@@ -91,9 +87,6 @@ public class LlamaQ4_0FFNLayersDecode extends LlamaQ4_0FFNLayers {
                     weights.freq_cis_realFlat.asFloatArray(),
                     weights.freq_cis_imagFlat.asFloatArray());
             layer.consumeFromDevice(pred, state.workspace.wrapBlockTable);
-            if (attentionSplits() > 0) {
-                layer.consumeFromDevice(pred, state.workspace.wrapAttSplit);
-            }
         }
         return layer;
     }

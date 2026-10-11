@@ -68,6 +68,7 @@ jitLLM is growing into a **serving engine** — the vLLM-style path for the JVM:
 
 - 🌐 **OpenAI-compatible server** — `jitllm serve` exposes `/v1/chat/completions` and `/v1/completions` with streaming and zero external dependencies. `/v1/models` reports the served context length, so clients size their prompts instead of guessing. Point any OpenAI client at `localhost`.
 - 🎯 **Tensor-core (MMA) batch prefill** on the CUDA backend, FP16 & Q8_0 — `--with-prefill-decode --batch-prefill-size N`.
+- 🍎 **SIMD-group matrix batch prefill on Apple Metal**, on by default for every supported family — e.g. Llama-3.2-1B F16 prompt processing 40 → 2372 tok/s, Qwen3-0.6B F16 4171 tok/s on an M4 Pro.
 - 📈 **llama-bench-style benchmarking** — `jitllm --bench` reports a pp/tg matrix with avg±stddev in md/csv/json/jsonl/sql. See [Running the CLI](#-running-the-cli) for the flag.
 - 🧮 **On-device greedy sampling** *(landing next)* — argmax on the GPU keeps logits device-side, cutting device→host traffic by ~500× per token. ([PR #134](https://github.com/beehive-lab/jitllm/pull/134))
 - 📚 **Static batched decode** *(landing next)* — B independent sequences per step for up to **41× aggregate throughput** (Llama & Qwen3). ([PR #129](https://github.com/beehive-lab/jitllm/pull/129))

@@ -4,6 +4,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.layers.AbstractLogitsTaskGraph;
 import org.beehive.jitllm.backend.tornado.scheduling.Fp16GemvReductionPolicy;
+import org.beehive.jitllm.backend.tornado.scheduling.Fp16GemvUnrollPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
@@ -181,7 +182,9 @@ public class LogitsFP16Layer extends AbstractLogitsTaskGraph {
             vocabularyProjectionReducesWithShuffle = true;
             logits.task(
                     "vocab_proj",
-                    TransformerComputeKernelsLayered::matrixVectorGenericSimd32,
+                    (Fp16GemvUnrollPolicy.unrolled()
+                            ? TransformerComputeKernelsLayered::matrixVectorGenericSimd32Unrolled
+                            : TransformerComputeKernelsLayered::matrixVectorGenericSimd32),
                     context,
                     state.workspace.wrapXbFP16,
                     state.workspace.wrapLogits,

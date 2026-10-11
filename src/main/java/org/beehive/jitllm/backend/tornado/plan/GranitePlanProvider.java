@@ -11,6 +11,7 @@ import org.beehive.jitllm.backend.tornado.plan.components.q8_0.GraniteQ8_0PlanCo
 import org.beehive.jitllm.inference.state.GraniteState;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
@@ -31,7 +32,7 @@ public final class GranitePlanProvider implements TornadoPlanProvider {
 
     @Override
     public Set<ExecutionMode> supportedModes() {
-        return TornadoSupportSets.STANDARD_ONLY;
+        return TornadoSupportSets.STANDARD_AND_BATCH;
     }
 
     @Override
@@ -46,5 +47,14 @@ public final class GranitePlanProvider implements TornadoPlanProvider {
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
         return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
+    }
+
+    /** The batched prefill runs the Metal SIMD-group kernels only, for its scaled residual and attention. */
+    @Override
+    public Optional<String> batchPrefillUnsupported(Combination c) {
+        return BackendId.METAL.equals(c.backend())
+                ? Optional.empty()
+                : Optional.of(
+                        "the granite batched prefill runs the Metal SIMD-group kernels only, for its scaled residual and attention");
     }
 }

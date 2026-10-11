@@ -42,6 +42,17 @@ public class LlamaFP16PlanComponents implements BatchPrefillDecodeForwardPlanCom
         this.schedulerType = SchedulerDetectionService.determineSchedulerType(model);
     }
 
+    /**
+     * For a family whose layers are Llama's under another configuration type (Mistral): the model's
+     * state and weights with a Llama view of its configuration.
+     */
+    public LlamaFP16PlanComponents(LlamaState state, Model model, LlamaConfiguration config) {
+        this.state = state;
+        this.config = config;
+        this.weights = (LlamaTornadoWeights) model.weights();
+        this.schedulerType = SchedulerDetectionService.determineSchedulerType(model);
+    }
+
     // ── Activations ───────────────────────────────────────────────────────────
 
     @Override

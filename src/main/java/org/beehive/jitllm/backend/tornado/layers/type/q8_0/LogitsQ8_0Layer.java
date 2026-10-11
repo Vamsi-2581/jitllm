@@ -3,6 +3,7 @@ package org.beehive.jitllm.backend.tornado.layers.type.q8_0;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.layers.AbstractLogitsTaskGraph;
+import org.beehive.jitllm.backend.tornado.scheduling.LogitsWorkgroupPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
@@ -173,7 +174,7 @@ public class LogitsQ8_0Layer extends AbstractLogitsTaskGraph {
      */
     protected void addVocabularyProjection(
             TaskGraph logits, TornadoWeights weights, Configuration config) {
-        int localSize = LOCAL_WORK_GROUP_SIZE_ALLOC * THREAD_SCALE_FOR_LOGITS;
+        int localSize = LogitsWorkgroupPolicy.q8Threads();
         var w = weights.wclsByteArray;
         if (packedVocabulary(weights)) {
             // Emitted here rather than by the caller, because the projection below is the only
@@ -316,10 +317,10 @@ public class LogitsQ8_0Layer extends AbstractLogitsTaskGraph {
     @Override
     public GridScheduler updateGridScheduler(GridScheduler tornadoForwardScheduler) {
         var logitsRMS = WorkerGridFactory.createRmsNormWorker(config.dim(), rmsLocalSize());
-        var vocabSizeRowMajor =
-                config.vocabularySize() * LOCAL_WORK_GROUP_SIZE_ALLOC * THREAD_SCALE_FOR_LOGITS;
+        int vocabThreads = LogitsWorkgroupPolicy.q8Threads();
+        var vocabSizeRowMajor = config.vocabularySize() * vocabThreads;
         var vocabWorker = new WorkerGrid1D(vocabSizeRowMajor);
-        vocabWorker.setLocalWork(LOCAL_WORK_GROUP_SIZE_ALLOC * THREAD_SCALE_FOR_LOGITS, 1, 1);
+        vocabWorker.setLocalWork(vocabThreads, 1, 1);
         tornadoForwardScheduler.addWorkerGrid("logits.vocab_proj", vocabWorker);
         tornadoForwardScheduler.addWorkerGrid("logits.rms_reduce", rmsReduceWorker(logitsRMS));
         tornadoForwardScheduler.addWorkerGrid("logits.mapContextLogits", logitsRMS);

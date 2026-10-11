@@ -7,6 +7,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ8_0D
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks;
 import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
+import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.GraniteState;
@@ -47,22 +48,34 @@ public class GraniteQ8_0FFNLayers
 
         // === Data Setup ===
         if (firstInGraph) {
-            unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+            String wrapXSrc = predecessorGraphName(layerIndex);
+            if (wrapXSrc != null) {
+                unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
+            } else {
+                unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+            }
         }
-        unifiedLayer.transferToDevice(
-                DataTransferMode.FIRST_EXECUTION,
-                // Copy-in weights per layer for batched-layered layout (Q8 format)
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                weights.wqLayered[layerIndex].asByteArray(),
-                weights.wkLayered[layerIndex].asByteArray(),
-                weights.wvLayered[layerIndex].asByteArray(),
-                weights.woLayered[layerIndex].asByteArray(),
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                weights.w1Layered[layerIndex].asByteArray(),
-                weights.w2Layered[layerIndex].asByteArray(),
-                weights.w3Layered[layerIndex].asByteArray());
+        Object[] layerWeights = {
+            // Copy-in weights per layer for batched-layered layout (Q8 format)
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.wqLayered[layerIndex].asByteArray(),
+            weights.wkLayered[layerIndex].asByteArray(),
+            weights.wvLayered[layerIndex].asByteArray(),
+            weights.woLayered[layerIndex].asByteArray(),
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            weights.w1Layered[layerIndex].asByteArray(),
+            weights.w2Layered[layerIndex].asByteArray(),
+            weights.w3Layered[layerIndex].asByteArray()
+        };
+        String weightSrc = weightSourceGraphName(layerIndex);
+        if (weightSrc != null) {
+            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
+        } else {
+            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
+        }
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+            bindDecodeScratch(unifiedLayer, layerIndex);
         }
 
         // === Attention Block ===
@@ -334,6 +347,32 @@ public class GraniteQ8_0FFNLayers
     /** Lanes per output row of the packed projections: a multiple of 32. */
     private static final int PACKED_LOCAL = 64;
 
+    /**
+     * Binds the split-KV attention scratch and, where the packed projections run, the quantized
+     * activation buffers: uploaded once by layer 0 and passed along the graph chain. Called by the graph
+     * that opens a group, so subclasses that replace {@link #configureLayerDataTransfers} keep it.
+     */
+    protected void bindDecodeScratch(TaskGraph unifiedLayer, int layerIndex) {
+        Object[] scratch =
+                PackedActivationTasks.enabled()
+                    ? java.util.stream.Stream.concat(
+                                    java.util.stream.Stream.of(state.workspace.wrapAttSplit),
+                                    java.util.Arrays.stream(
+                                            PackedActivationTasks.buffers(state.workspace)))
+                            .toArray()
+                    : new Object[] {state.workspace.wrapAttSplit};
+        if (layerIndex == 0) {
+            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, scratch);
+            return;
+        }
+        String source = predecessorGraphName(layerIndex);
+        if (source != null) {
+            unifiedLayer.consumeFromDevice(source, scratch);
+        } else {
+            unifiedLayer.consumeFromDevice(scratch);
+        }
+    }
+
     // @formatter:off
     protected TaskGraph configureLayerDataTransfers(TaskGraph unifiedLayer, int layerIndex) {
         // First layer: Transfer initial data to device (one-time transfer)
@@ -361,13 +400,6 @@ public class GraniteQ8_0FFNLayers
             // the kernels reading a mapping that no longer exists, silently.
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
-            unifiedLayer.transferToDevice(
-                    DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
-            if (PackedActivationTasks.enabled()) {
-                unifiedLayer.transferToDevice(
-                        DataTransferMode.FIRST_EXECUTION,
-                        PackedActivationTasks.buffers(state.workspace));
-            }
         } else {
             // Subsequent layers: Consume data already on device from previous layer
             unifiedLayer.consumeFromDevice(
@@ -384,10 +416,6 @@ public class GraniteQ8_0FFNLayers
                     state.workspace.positionHolder);
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
-            unifiedLayer.consumeFromDevice(state.workspace.wrapAttSplit);
-            if (PackedActivationTasks.enabled()) {
-                unifiedLayer.consumeFromDevice(PackedActivationTasks.buffers(state.workspace));
-            }
         }
         return unifiedLayer;
     }
@@ -513,7 +541,10 @@ public class GraniteQ8_0FFNLayers
                     config.headSize(),
                     State.SPLIT_KV);
         }
-        if (schedulerType == SchedulerType.NVIDIA) {
+        // Metal runs the flash kernel too: processHeadsParallelGranitePaged produces wrong output
+        // there (Granite 3.2 2B and 4.0 1B answered with punctuation in both representations).
+        if (schedulerType == SchedulerType.NVIDIA
+                || SchedulerDetectionService.isSubgroupShuffle32Supported()) {
             // Flash Attention (optimized for NVIDIA GPUs)
             if (useFp16KVCache()) {
                 return unifiedLayer.task(
@@ -589,5 +620,22 @@ public class GraniteQ8_0FFNLayers
         return useFp16KVCache()
                 ? state.workspace.wrapValueCacheFP16
                 : state.workspace.wrapValueCache;
+    }
+
+    /**
+     * The graph {@code wrapX} is consumed from, or {@code null} for the no-arg form. The batched
+     * prefill/decode plan's decode layers name their predecessor; see {@code
+     * LlamaFP16FFNLayers#predecessorGraphName}.
+     */
+    protected String predecessorGraphName(int layerIndex) {
+        return null;
+    }
+
+    /**
+     * The graph that already uploaded this layer's weights, or {@code null} to upload them here;
+     * see {@code LlamaFP16FFNLayers#weightSourceGraphName}.
+     */
+    protected String weightSourceGraphName(int layerIndex) {
+        return null;
     }
 }

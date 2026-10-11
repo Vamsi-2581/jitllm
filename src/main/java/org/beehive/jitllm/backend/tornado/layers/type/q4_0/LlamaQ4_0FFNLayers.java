@@ -144,6 +144,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         }
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+            bindAttentionScratch(unifiedLayer, layerIndex);
             if (dp4a()) {
                 Object[] packed = PackedActivationTasks.buffers(state.workspace);
                 if (layerIndex == firstLayer) {

@@ -175,27 +175,39 @@ public class Qwen2Q8_0FFNLayers
                 firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         if (firstInGraph) {
-            unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+            String wrapXSrc = predecessorGraphName(layerIndex);
+            if (wrapXSrc != null) {
+                unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
+            } else {
+                unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+            }
         }
-        unifiedLayer.transferToDevice(
-                DataTransferMode.FIRST_EXECUTION,
-                // Attention weights
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                weights.wqLayered[layerIndex].asByteArray(),
-                weights.wkLayered[layerIndex].asByteArray(),
-                weights.wvLayered[layerIndex].asByteArray(),
-                weights.woLayered[layerIndex].asByteArray(),
-                // Qwen2-specific bias terms
-                weights.q_biasLayered[layerIndex].asFloatArray(),
-                weights.k_biasLayered[layerIndex].asFloatArray(),
-                weights.v_biasLayered[layerIndex].asFloatArray(),
-                // FFN weights
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                weights.w1Layered[layerIndex].asByteArray(),
-                weights.w2Layered[layerIndex].asByteArray(),
-                weights.w3Layered[layerIndex].asByteArray());
+        Object[] layerWeights = {
+            // Attention weights
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.wqLayered[layerIndex].asByteArray(),
+            weights.wkLayered[layerIndex].asByteArray(),
+            weights.wvLayered[layerIndex].asByteArray(),
+            weights.woLayered[layerIndex].asByteArray(),
+            // Qwen2-specific bias terms
+            weights.q_biasLayered[layerIndex].asFloatArray(),
+            weights.k_biasLayered[layerIndex].asFloatArray(),
+            weights.v_biasLayered[layerIndex].asFloatArray(),
+            // FFN weights
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            weights.w1Layered[layerIndex].asByteArray(),
+            weights.w2Layered[layerIndex].asByteArray(),
+            weights.w3Layered[layerIndex].asByteArray()
+        };
+        String weightSrc = weightSourceGraphName(layerIndex);
+        if (weightSrc != null) {
+            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
+        } else {
+            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
+        }
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
+            bindDecodeScratch(unifiedLayer, layerIndex);
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -548,6 +560,32 @@ public class Qwen2Q8_0FFNLayers
     /** Lanes per output row of the packed projections: a multiple of 32. */
     private static final int PACKED_LOCAL = 32;
 
+    /**
+     * Binds the split-KV attention scratch and, where the packed projections run, the quantized
+     * activation buffers: uploaded once by layer 0 and passed along the graph chain. Called by the graph
+     * that opens a group, so subclasses that replace {@link #configureLayerDataTransfers} keep it.
+     */
+    protected void bindDecodeScratch(TaskGraph unifiedLayer, int layerIndex) {
+        Object[] scratch =
+                PackedActivationTasks.enabled()
+                    ? java.util.stream.Stream.concat(
+                                    java.util.stream.Stream.of(state.workspace.wrapAttSplit),
+                                    java.util.Arrays.stream(
+                                            PackedActivationTasks.buffers(state.workspace)))
+                            .toArray()
+                    : new Object[] {state.workspace.wrapAttSplit};
+        if (layerIndex == 0) {
+            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, scratch);
+            return;
+        }
+        String source = predecessorGraphName(layerIndex);
+        if (source != null) {
+            unifiedLayer.consumeFromDevice(source, scratch);
+        } else {
+            unifiedLayer.consumeFromDevice(scratch);
+        }
+    }
+
     /** Configure data transfers for first and subsequent layers */
     // @formatter:off
     protected TaskGraph configureLayerDataTransfers(TaskGraph unifiedLayer, int layerIndex) {
@@ -576,13 +614,6 @@ public class Qwen2Q8_0FFNLayers
             // the kernels reading a mapping that no longer exists, silently.
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
-            unifiedLayer.transferToDevice(
-                    DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
-            if (PackedActivationTasks.enabled()) {
-                unifiedLayer.transferToDevice(
-                        DataTransferMode.FIRST_EXECUTION,
-                        PackedActivationTasks.buffers(state.workspace));
-            }
         } else {
             // Subsequent layers: Consume data from previous layer
             unifiedLayer.consumeFromDevice(
@@ -599,10 +630,6 @@ public class Qwen2Q8_0FFNLayers
                     qwen2State.workspace.positionHolder);
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
-            unifiedLayer.consumeFromDevice(state.workspace.wrapAttSplit);
-            if (PackedActivationTasks.enabled()) {
-                unifiedLayer.consumeFromDevice(PackedActivationTasks.buffers(state.workspace));
-            }
         }
         return unifiedLayer;
     }
@@ -619,5 +646,22 @@ public class Qwen2Q8_0FFNLayers
         return useFp16KVCache()
                 ? state.workspace.wrapValueCacheFP16
                 : state.workspace.wrapValueCache;
+    }
+
+    /**
+     * The graph {@code wrapX} is consumed from, or {@code null} for the no-arg form. The batched
+     * prefill/decode plan's decode layers name their predecessor; see {@code
+     * LlamaFP16FFNLayers#predecessorGraphName}.
+     */
+    protected String predecessorGraphName(int layerIndex) {
+        return null;
+    }
+
+    /**
+     * The graph that already uploaded this layer's weights, or {@code null} to upload them here;
+     * see {@code LlamaFP16FFNLayers#weightSourceGraphName}.
+     */
+    protected String weightSourceGraphName(int layerIndex) {
+        return null;
     }
 }

@@ -3,6 +3,7 @@ package org.beehive.jitllm.api;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
+import org.beehive.jitllm.backend.tornado.BatchPrefillSupport;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.model.loader.ModelLoader;
 import org.beehive.jitllm.runtime.backend.BackendId;
@@ -11,6 +12,7 @@ import org.beehive.jitllm.runtime.backend.DeviceResolver;
 import org.beehive.jitllm.runtime.backend.DeviceResolvers;
 import org.beehive.jitllm.runtime.diagnostics.DiagnosticCode;
 import org.beehive.jitllm.runtime.memory.MemoryPlan;
+import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 
 /**
  * Where a caller starts: load a model file, get a {@link LocalModel}.
@@ -63,11 +65,17 @@ public final class LocalModels {
             }
             throw exhaustion;
         }
+        // A policy nobody chose takes the device's default, which needs the loaded model: batched
+        // prefill on Metal for the families tuned for it (BatchPrefillSupport.defaultFor).
+        ExecutionPolicy policy =
+                gpu && options.usesDefaultExecutionPolicy()
+                        ? BatchPrefillSupport.defaultFor(model, options.executionPolicy())
+                        : options.executionPolicy();
         return new DelegatingModel(
                 model,
                 modelFile,
                 gpu,
-                options.executionPolicy(),
+                policy,
                 options.storageOptions(),
                 options.thinkingMode(),
                 options.reasoningEffort(),

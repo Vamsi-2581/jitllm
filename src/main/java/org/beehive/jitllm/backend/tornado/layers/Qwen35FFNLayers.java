@@ -1027,6 +1027,18 @@ public class Qwen35FFNLayers
     }
 
     /** Whether this state's key/value store is half precision. */
+    /**
+     * Whether decode attention takes 8-position key/value tiles: on Metal, where two 16-position
+     * float tiles of this family's 256-wide head (32 KB) plus the query do not fit the 32 KB of
+     * threadgroup memory.
+     */
+    private boolean narrowAttentionTiles() {
+        return org.beehive.jitllm.runtime.backend.BackendId.METAL.equals(
+                        org.beehive.jitllm.backend.tornado.device.TornadoDevices.current()
+                                .backend())
+                && (2 * 16 + 1) * config.headSize() * Float.BYTES > 32 * 1024;
+    }
+
     protected boolean fp16Kv() {
         return state.usesFp16KeyValueCache();
     }
@@ -1473,7 +1485,9 @@ public class Qwen35FFNLayers
         } else if (fp16Kv()) {
             layer.task(
                     tn("attention"),
-                    TransformerPagedKvKernels::processHeadsFlashAttentionFP16Paged,
+                    narrowAttentionTiles()
+                            ? TransformerPagedKvKernels::processHeadsFlashAttentionFP16PagedTile8
+                            : TransformerPagedKvKernels::processHeadsFlashAttentionFP16Paged,
                     context,
                     qwen35State.workspace.wrapAttnQ,
                     qwen35State.workspace.wrapKeyCacheFP16,
@@ -1491,7 +1505,9 @@ public class Qwen35FFNLayers
         } else {
             layer.task(
                     tn("attention"),
-                    TransformerPagedKvKernels::processHeadsFlashAttentionPaged,
+                    narrowAttentionTiles()
+                            ? TransformerPagedKvKernels::processHeadsFlashAttentionPagedTile8
+                            : TransformerPagedKvKernels::processHeadsFlashAttentionPaged,
                     context,
                     qwen35State.workspace.wrapAttnQ,
                     qwen35State.workspace.wrapKeyCache,

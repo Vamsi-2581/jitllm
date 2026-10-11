@@ -3,8 +3,11 @@ package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
 import java.util.List;
 import java.util.stream.IntStream;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
@@ -158,20 +161,41 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                 state.workspace.attnScaleBatch,
                 dim);
 
-        layer.task(
-                "batch_qkv",
-                TransformerBatchPrefillKernels::batchedFusedQKVMatmulQ8,
-                context,
-                state.workspace.wrapXbBatch,
-                state.workspace.wrapQBatch,
-                state.workspace.wrapKBatch,
-                state.workspace.wrapVBatch,
-                weights.wqLayered[layerIndex].asByteArray(),
-                weights.wkLayered[layerIndex].asByteArray(),
-                weights.wvLayered[layerIndex].asByteArray(),
-                dim,
-                kvDim,
-                LOCAL_WORK_GROUP_SIZE);
+        if (simdgroupGemm()) {
+
+            layer.task(
+                    "batch_qkv",
+                    TransformerBatchPrefillSimdgroupKernels::batchedGemmQKVQ8,
+                    context,
+                    state.workspace.wrapXbBatch,
+                    state.workspace.wrapQBatch,
+                    state.workspace.wrapKBatch,
+                    state.workspace.wrapVBatch,
+                    weights.wqLayered[layerIndex].asByteArray(),
+                    weights.wkLayered[layerIndex].asByteArray(),
+                    weights.wvLayered[layerIndex].asByteArray(),
+                    dim,
+                    dim,
+                    kvDim,
+                    batchSize);
+
+        } else {
+
+            layer.task(
+                    "batch_qkv",
+                    TransformerBatchPrefillKernels::batchedFusedQKVMatmulQ8,
+                    context,
+                    state.workspace.wrapXbBatch,
+                    state.workspace.wrapQBatch,
+                    state.workspace.wrapKBatch,
+                    state.workspace.wrapVBatch,
+                    weights.wqLayered[layerIndex].asByteArray(),
+                    weights.wkLayered[layerIndex].asByteArray(),
+                    weights.wvLayered[layerIndex].asByteArray(),
+                    dim,
+                    kvDim,
+                    LOCAL_WORK_GROUP_SIZE);
+        }
 
         if (useFp16KVCache()) {
             layer.task(
@@ -236,36 +260,116 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                     state.kvBlockStride,
                     dim);
         } else {
-            layer.task(
-                    "batch_attention",
-                    TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionPaged,
-                    context,
-                    state.workspace.batchStartPosHolder,
-                    state.workspace.wrapQBatch,
-                    state.workspace.wrapKeyCache,
-                    state.workspace.wrapValueCache,
-                    state.workspace.wrapXbBatch,
-                    config.numberOfHeads(),
-                    config.headSize(),
-                    kvDim,
-                    config.kvMul(),
-                    layerIndex,
-                    state.workspace.wrapBlockTable,
-                    state.kvBlockCfg,
-                    state.kvBlockStride,
-                    dim);
+            if (simdgroupAttention()) {
+                if (headSize() == 64) {
+                    layer.task(
+                            "batch_attention",
+                            TransformerPagedKvBatchPrefillSimdgroupKernels
+                                    ::batchedFlashAttentionPagedHead64,
+                            context,
+                            state.workspace.batchStartPosHolder,
+                            state.workspace.wrapQBatch,
+                            state.workspace.wrapKeyCache,
+                            state.workspace.wrapValueCache,
+                            state.workspace.wrapXbBatch,
+                            config.numberOfHeads(),
+                            config.headSize(),
+                            kvDim,
+                            config.kvMul(),
+                            layerIndex,
+                            state.workspace.wrapBlockTable,
+                            state.kvBlockCfg,
+                            state.kvBlockStride,
+                            dim);
+                } else if (headSize() == 96) {
+                    layer.task(
+                            "batch_attention",
+                            TransformerPagedKvBatchPrefillSimdgroupKernels
+                                    ::batchedFlashAttentionPagedHead96,
+                            context,
+                            state.workspace.batchStartPosHolder,
+                            state.workspace.wrapQBatch,
+                            state.workspace.wrapKeyCache,
+                            state.workspace.wrapValueCache,
+                            state.workspace.wrapXbBatch,
+                            config.numberOfHeads(),
+                            config.headSize(),
+                            kvDim,
+                            config.kvMul(),
+                            layerIndex,
+                            state.workspace.wrapBlockTable,
+                            state.kvBlockCfg,
+                            state.kvBlockStride,
+                            dim);
+                } else {
+                    layer.task(
+                            "batch_attention",
+                            TransformerPagedKvBatchPrefillSimdgroupKernels
+                                    ::batchedFlashAttentionPagedHead128,
+                            context,
+                            state.workspace.batchStartPosHolder,
+                            state.workspace.wrapQBatch,
+                            state.workspace.wrapKeyCache,
+                            state.workspace.wrapValueCache,
+                            state.workspace.wrapXbBatch,
+                            config.numberOfHeads(),
+                            config.headSize(),
+                            kvDim,
+                            config.kvMul(),
+                            layerIndex,
+                            state.workspace.wrapBlockTable,
+                            state.kvBlockCfg,
+                            state.kvBlockStride,
+                            dim);
+                }
+            } else {
+                layer.task(
+                        "batch_attention",
+                        TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionPaged,
+                        context,
+                        state.workspace.batchStartPosHolder,
+                        state.workspace.wrapQBatch,
+                        state.workspace.wrapKeyCache,
+                        state.workspace.wrapValueCache,
+                        state.workspace.wrapXbBatch,
+                        config.numberOfHeads(),
+                        config.headSize(),
+                        kvDim,
+                        config.kvMul(),
+                        layerIndex,
+                        state.workspace.wrapBlockTable,
+                        state.kvBlockCfg,
+                        state.kvBlockStride,
+                        dim);
+            }
         }
 
-        layer.task(
-                "batch_attn_out",
-                TransformerBatchPrefillKernels::batchedMatVecWithResidualQ8,
-                context,
-                state.workspace.wrapXbBatch,
-                state.workspace.wrapXBatch,
-                weights.woLayered[layerIndex].asByteArray(),
-                dim,
-                dim,
-                LOCAL_WORK_GROUP_SIZE);
+        if (simdgroupGemm()) {
+
+            layer.task(
+                    "batch_attn_out",
+                    TransformerBatchPrefillSimdgroupKernels::batchedGemmQ8WithResidual,
+                    context,
+                    state.workspace.wrapXbBatch,
+                    state.workspace.wrapXBatch,
+                    weights.woLayered[layerIndex].asByteArray(),
+                    dim,
+                    dim,
+                    batchSize);
+
+        } else {
+
+            layer.task(
+                    "batch_attn_out",
+                    TransformerBatchPrefillKernels::batchedMatVecWithResidualQ8,
+                    context,
+                    state.workspace.wrapXbBatch,
+                    state.workspace.wrapXBatch,
+                    weights.woLayered[layerIndex].asByteArray(),
+                    dim,
+                    dim,
+                    LOCAL_WORK_GROUP_SIZE);
+        }
 
         // ── FFN Block ──────────────────────────────────────────────────────────
         layer.task(
@@ -277,30 +381,65 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                 dim,
                 config.rmsNormEps());
 
-        layer.task(
-                "batch_ffn_gate_up",
-                TransformerBatchPrefillKernels::batchedFusedRmsNormFFNGateUpQ8,
-                context,
-                state.workspace.wrapXBatch,
-                state.workspace.wrapHbBatch,
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                state.workspace.ffnScaleBatch,
-                weights.w1Layered[layerIndex].asByteArray(),
-                weights.w3Layered[layerIndex].asByteArray(),
-                dim,
-                hidDim,
-                LOCAL_WORK_GROUP_SIZE);
+        if (simdgroupGemm()) {
 
-        layer.task(
-                "batch_ffn_down",
-                TransformerBatchPrefillKernels::batchedMatVecWithResidualQ8,
-                context,
-                state.workspace.wrapHbBatch,
-                state.workspace.wrapXBatch,
-                weights.w2Layered[layerIndex].asByteArray(),
-                hidDim,
-                dim,
-                LOCAL_WORK_GROUP_SIZE);
+            layer.task(
+                    "batch_ffn_gate_up",
+                    TransformerBatchPrefillSimdgroupKernels::batchedGemmRmsNormFFNGateUpQ8,
+                    context,
+                    state.workspace.wrapXBatch,
+                    state.workspace.wrapHbBatch,
+                    weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.ffnScaleBatch,
+                    weights.w1Layered[layerIndex].asByteArray(),
+                    weights.w3Layered[layerIndex].asByteArray(),
+                    dim,
+                    hidDim,
+                    batchSize);
+
+        } else {
+
+            layer.task(
+                    "batch_ffn_gate_up",
+                    TransformerBatchPrefillKernels::batchedFusedRmsNormFFNGateUpQ8,
+                    context,
+                    state.workspace.wrapXBatch,
+                    state.workspace.wrapHbBatch,
+                    weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.ffnScaleBatch,
+                    weights.w1Layered[layerIndex].asByteArray(),
+                    weights.w3Layered[layerIndex].asByteArray(),
+                    dim,
+                    hidDim,
+                    LOCAL_WORK_GROUP_SIZE);
+        }
+
+        if (simdgroupGemm()) {
+
+            layer.task(
+                    "batch_ffn_down",
+                    TransformerBatchPrefillSimdgroupKernels::batchedGemmQ8WithResidual,
+                    context,
+                    state.workspace.wrapHbBatch,
+                    state.workspace.wrapXBatch,
+                    weights.w2Layered[layerIndex].asByteArray(),
+                    hidDim,
+                    dim,
+                    batchSize);
+
+        } else {
+
+            layer.task(
+                    "batch_ffn_down",
+                    TransformerBatchPrefillKernels::batchedMatVecWithResidualQ8,
+                    context,
+                    state.workspace.wrapHbBatch,
+                    state.workspace.wrapXBatch,
+                    weights.w2Layered[layerIndex].asByteArray(),
+                    hidDim,
+                    dim,
+                    LOCAL_WORK_GROUP_SIZE);
+        }
 
         layer.persistOnDevice(state.workspace.wrapXBatch, keyCache(), valueCache());
 
@@ -350,6 +489,42 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
             scheduler.addWorkerGrid(p + "batch_ffn_gate_up", matVecHidWorker);
             scheduler.addWorkerGrid(p + "batch_ffn_down", matVecDimWorker);
         }
+
+        if (simdgroupGemm()) {
+            int local = TransformerBatchPrefillSimdgroupKernels.THREADS;
+            int tokenTiles = (batchSize + 63) / 64;
+            int sgQkvRows = dim + 2 * kvDim;
+            WorkerGrid sgQkv =
+                    WorkerGridFactory.genericWorker((sgQkvRows / 64) * tokenTiles * local, local);
+            WorkerGrid sgDim =
+                    WorkerGridFactory.genericWorker(((dim + 63) / 64) * tokenTiles * local, local);
+            WorkerGrid sgHid =
+                    WorkerGridFactory.genericWorker(
+                            ((hidDim + 31) / 32) * tokenTiles * local, local);
+            for (int i = 0; i < config.numberOfLayers(); i++) {
+                String p = "batchPrefillLayer_" + i + ".";
+                scheduler.addWorkerGrid(p + "batch_qkv", sgQkv);
+                scheduler.addWorkerGrid(p + "batch_attn_out", sgDim);
+                scheduler.addWorkerGrid(p + "batch_ffn_gate_up", sgHid);
+                scheduler.addWorkerGrid(p + "batch_ffn_down", sgDim);
+            }
+        }
+        if (simdgroupAttention()) {
+            WorkerGrid sgAttn =
+                    WorkerGridFactory.genericWorker(
+                            ((batchSize
+                                                    + TransformerPagedKvBatchPrefillSimdgroupKernels
+                                                            .QUERY_TILE
+                                                    - 1)
+                                            / TransformerPagedKvBatchPrefillSimdgroupKernels
+                                                    .QUERY_TILE)
+                                    * config.numberOfHeads()
+                                    * TransformerPagedKvBatchPrefillSimdgroupKernels.THREADS,
+                            TransformerPagedKvBatchPrefillSimdgroupKernels.THREADS);
+            for (int i = 0; i < config.numberOfLayers(); i++) {
+                scheduler.addWorkerGrid("batchPrefillLayer_" + i + ".batch_attention", sgAttn);
+            }
+        }
     }
 
     private static int findOptimalLocalSize(int size) {
@@ -395,5 +570,25 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         return useFp16KVCache()
                 ? state.workspace.wrapValueCacheFP16
                 : state.workspace.wrapValueCache;
+    }
+
+    /**
+     * The SIMD-group projections; see {@link BatchPrefillGemmPolicy#simdgroup(int, int, int, int)}.
+     */
+    private boolean simdgroupGemm() {
+        return BatchPrefillGemmPolicy.simdgroup(
+                config.dim(), config.dim(), config.kvDim(), config.hiddenDim());
+    }
+
+    /**
+     * SIMD-group attention over the FP32 cache; see {@link
+     * BatchPrefillGemmPolicy#simdgroupAttention(int)}.
+     */
+    private boolean simdgroupAttention() {
+        return !useFp16KVCache() && BatchPrefillGemmPolicy.simdgroupAttention(headSize());
+    }
+
+    private int headSize() {
+        return config.headSize();
     }
 }

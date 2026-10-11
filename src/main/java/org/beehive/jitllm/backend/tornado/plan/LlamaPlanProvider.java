@@ -12,6 +12,7 @@ import org.beehive.jitllm.backend.tornado.plan.components.q8_0.LlamaQ8_0PlanComp
 import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
@@ -59,12 +60,14 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
     }
 
     /**
-     * Llama Q4_0's batched prefill exists only with its projections in cuBLAS: without native
-     * libraries there is nothing to build.
+     * Llama Q4_0's batched prefill runs its projections in cuBLAS, or on the Metal SIMD-group
+     * kernels: elsewhere, without native libraries there is nothing to build.
      */
     @Override
     public Optional<String> batchPrefillNeeds(Combination c, ExecutionPolicy policy) {
-        if (c.weights() == DataType.Q4_0 && !NativePrefillSupport.nativeProjections(policy)) {
+        if (c.weights() == DataType.Q4_0
+                && !BackendId.METAL.equals(c.backend())
+                && !NativePrefillSupport.nativeProjections(policy)) {
             return Optional.of(
                     "the llama Q4_0 batched prefill runs its projections through cuBLAS; add"
                             + " --with-native-libraries on a CUDA device with tensor cores");

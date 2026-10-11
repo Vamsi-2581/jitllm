@@ -5,8 +5,12 @@ import java.util.stream.IntStream;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
@@ -157,7 +161,11 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
 
         layer.task(
                 "batch_qkv",
-                Qwen3Kernels::batchedFusedQKVMatmulFP16,
+                tiledQkv()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels::batchedGemmQKVFP16
+                                : TransformerBatchPrefillKernels::batchedGemmQKVFP16)
+                        : Qwen3Kernels::batchedFusedQKVMatmulFP16,
                 context,
                 state.workspace.wrapXbFP16Batch,
                 state.workspace.wrapQBatch,
@@ -169,7 +177,7 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                 dim,
                 qDim,
                 kvDim,
-                LOCAL_WORK_GROUP_SIZE);
+                tiledQkv() ? batchSize : LOCAL_WORK_GROUP_SIZE);
 
         layer.task(
                 "batch_qk_rmsnorm",
@@ -250,7 +258,14 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
         } else {
             layer.task(
                     "batch_attention",
-                    TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionPaged,
+                    simdgroupAttention()
+                            ? TransformerPagedKvBatchPrefillSimdgroupKernels
+                                    ::batchedFlashAttentionPagedHead128
+                            : laneAttention()
+                                    ? TransformerPagedKvBatchPrefillKernels
+                                            ::batchedFlashAttentionPagedLaneHead128
+                                    : TransformerPagedKvBatchPrefillKernels
+                                            ::batchedFlashAttentionPaged,
                     context,
                     state.workspace.batchStartPosHolder,
                     state.workspace.wrapQBatch,
@@ -271,14 +286,19 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
         // Output projection: n=qDim (input), d=dim (output)
         layer.task(
                 "batch_attn_out",
-                TransformerBatchPrefillKernels::batchedMatVecWithResidual,
+                tiledGemm()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels
+                                        ::batchedGemmFP16WithResidual
+                                : TransformerBatchPrefillKernels::batchedGemmFP16WithResidual)
+                        : TransformerBatchPrefillKernels::batchedMatVecWithResidual,
                 context,
                 state.workspace.wrapXbBatch,
                 state.workspace.wrapXBatch,
                 weights.woLayered[layerIndex].asHalfFloatArray(),
                 qDim,
                 dim,
-                LOCAL_WORK_GROUP_SIZE);
+                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
 
         // ── FFN Block ──────────────────────────────────────────────────────────
         layer.task(
@@ -292,7 +312,12 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
 
         layer.task(
                 "batch_ffn_gate_up",
-                TransformerBatchPrefillKernels::batchedFusedRmsNormFFNGateUp,
+                tiledGemm()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels
+                                        ::batchedGemmRmsNormFFNGateUpFP16
+                                : TransformerBatchPrefillKernels::batchedGemmRmsNormFFNGateUpFP16)
+                        : TransformerBatchPrefillKernels::batchedFusedRmsNormFFNGateUp,
                 context,
                 state.workspace.wrapXBatch,
                 state.workspace.wrapHbBatch,
@@ -302,18 +327,23 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                 weights.w3Layered[layerIndex].asHalfFloatArray(),
                 dim,
                 hidDim,
-                LOCAL_WORK_GROUP_SIZE);
+                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
 
         layer.task(
                 "batch_ffn_down",
-                TransformerBatchPrefillKernels::batchedMatVecWithResidual,
+                tiledGemm()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels
+                                        ::batchedGemmFP16WithResidual
+                                : TransformerBatchPrefillKernels::batchedGemmFP16WithResidual)
+                        : TransformerBatchPrefillKernels::batchedMatVecWithResidual,
                 context,
                 state.workspace.wrapHbBatch,
                 state.workspace.wrapXBatch,
                 weights.w2Layered[layerIndex].asHalfFloatArray(),
                 hidDim,
                 dim,
-                LOCAL_WORK_GROUP_SIZE);
+                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
 
         layer.persistOnDevice(state.workspace.wrapXBatch, keyCache(), valueCache());
 
@@ -343,15 +373,39 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
         while (ropeLocal > 1 && ropeGlobal % ropeLocal != 0) ropeLocal--;
         WorkerGrid ropeWorker = WorkerGridFactory.genericWorker(ropeGlobal, ropeLocal);
 
-        int optLocal = findOptimalLocalSize(nEmbdHead);
+        int optLocal =
+                laneAttention()
+                        ? 32 * LaneAttentionPolicy.PREFILL_WARPS_PER_GROUP
+                        : findOptimalLocalSize(nEmbdHead);
+        int attnTiles =
+                (batchSize + TransformerPagedKvBatchPrefillSimdgroupKernels.QUERY_TILE - 1)
+                        / TransformerPagedKvBatchPrefillSimdgroupKernels.QUERY_TILE;
         WorkerGrid attnWorker =
-                WorkerGridFactory.genericWorker(
-                        batchSize * config.numberOfHeads() * optLocal, optLocal);
+                simdgroupAttention()
+                        ? WorkerGridFactory.genericWorker(
+                                attnTiles
+                                        * config.numberOfHeads()
+                                        * TransformerPagedKvBatchPrefillSimdgroupKernels.THREADS,
+                                TransformerPagedKvBatchPrefillSimdgroupKernels.THREADS)
+                        : WorkerGridFactory.genericWorker(
+                                batchSize * config.numberOfHeads() * optLocal, optLocal);
 
         // Wo: B*dim output rows (n=qDim, d=dim)
         WorkerGrid matVecDimWorker =
                 WorkerGridFactory.genericWorker(
                         batchSize * dim * LOCAL_WORK_GROUP_SIZE, LOCAL_WORK_GROUP_SIZE);
+        int gemmLocal = simdgroupGemm() ? TransformerBatchPrefillSimdgroupKernels.THREADS : 256;
+        int hidTile = simdgroupGemm() ? 32 : 64;
+        WorkerGrid gemmDimWorker =
+                WorkerGridFactory.genericWorker(
+                        ((dim + 63) / 64) * ((batchSize + 63) / 64) * gemmLocal, gemmLocal);
+        WorkerGrid gemmHidWorker =
+                WorkerGridFactory.genericWorker(
+                        ((hidDim + hidTile - 1) / hidTile) * ((batchSize + 63) / 64) * gemmLocal,
+                        gemmLocal);
+        WorkerGrid gemmQkvWorker =
+                WorkerGridFactory.genericWorker(
+                        ((qDim + 2 * kvDim) / 64) * ((batchSize + 63) / 64) * gemmLocal, gemmLocal);
         WorkerGrid matVecHidWorker =
                 WorkerGridFactory.genericWorker(
                         batchSize * hidDim * LOCAL_WORK_GROUP_SIZE, LOCAL_WORK_GROUP_SIZE);
@@ -360,14 +414,17 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
             String p = "batchPrefillLayer_" + i + ".";
             scheduler.addWorkerGrid(p + "batch_attn_rms", rmsWorker);
             scheduler.addWorkerGrid(p + "batch_attn_rms_apply", rmsApplyWorker);
-            scheduler.addWorkerGrid(p + "batch_qkv", qkvWorker);
+            scheduler.addWorkerGrid(p + "batch_qkv", tiledQkv() ? gemmQkvWorker : qkvWorker);
             scheduler.addWorkerGrid(p + "batch_qk_rmsnorm", qkRmsNormWorker);
             scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
             scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
-            scheduler.addWorkerGrid(p + "batch_attn_out", matVecDimWorker);
+            scheduler.addWorkerGrid(
+                    p + "batch_attn_out", tiledGemm() ? gemmDimWorker : matVecDimWorker);
             scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);
-            scheduler.addWorkerGrid(p + "batch_ffn_gate_up", matVecHidWorker);
-            scheduler.addWorkerGrid(p + "batch_ffn_down", matVecDimWorker);
+            scheduler.addWorkerGrid(
+                    p + "batch_ffn_gate_up", tiledGemm() ? gemmHidWorker : matVecHidWorker);
+            scheduler.addWorkerGrid(
+                    p + "batch_ffn_down", tiledGemm() ? gemmDimWorker : matVecDimWorker);
         }
     }
 
@@ -414,5 +471,37 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
         return useFp16KVCache()
                 ? state.workspace.wrapValueCacheFP16
                 : state.workspace.wrapValueCache;
+    }
+
+    /** The lane-cooperative kernel over the FP32 cache; see {@link LaneAttentionPolicy}. */
+    private boolean laneAttention() {
+        return !useFp16KVCache()
+                && LaneAttentionPolicy.laneCooperativeAttentionFp32Cache(nEmbdHead);
+    }
+
+    /** Attention over the FP32 cache on SIMD-group matrices; see {@link BatchPrefillGemmPolicy}. */
+    private boolean simdgroupAttention() {
+        return laneAttention() && BatchPrefillGemmPolicy.simdgroupAttention();
+    }
+
+    /** The tiled QKV kernel needs every 64-row tile to lie in one of Q, K and V. */
+    private boolean tiledQkv() {
+        return tiledGemm() && qDim % 64 == 0 && kvDim % 64 == 0;
+    }
+
+    /** The tiled projection kernels; see {@link BatchPrefillGemmPolicy}. */
+    private static boolean tiledGemm() {
+        return BatchPrefillGemmPolicy.tiled();
+    }
+
+    /**
+     * The tiled projections on SIMD-group matrices; see {@link BatchPrefillGemmPolicy}. Their
+     * double-buffered k-loop needs every contraction length to be a multiple of 64.
+     */
+    private boolean simdgroupGemm() {
+        return BatchPrefillGemmPolicy.simdgroup()
+                && config.dim() % 64 == 0
+                && config.hiddenDim() % 64 == 0
+                && qDim % 64 == 0;
     }
 }

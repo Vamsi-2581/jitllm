@@ -9,6 +9,7 @@ import org.beehive.jitllm.backend.tornado.plan.components.q8_0.Gemma4Q8_0PlanCom
 import org.beehive.jitllm.inference.state.Gemma4State;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
@@ -111,10 +112,12 @@ public final class Gemma4PlanProvider implements TornadoPlanProvider {
     @Override
     public Optional<String> batchPrefillUnsupported(Combination c) {
         return c.tensorCores()
+                        || (BackendId.METAL.equals(c.backend()) && c.weights() == DataType.Q8_0)
                 ? Optional.empty()
                 : Optional.of(
-                        "the gemma4 batched prefill is written for tensor cores"
-                                + " only, which this device does not have");
+                        "the gemma4 batched prefill is written for tensor cores, and for Q8_0"
+                                + " weights on the Metal SIMD-group kernels, neither of which"
+                                + " this combination has");
     }
 
     /**

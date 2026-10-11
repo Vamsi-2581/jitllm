@@ -6,6 +6,7 @@ import org.beehive.jitllm.backend.tornado.layers.Activation;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.layers.llama.LlamaQ4_0LayersBatchPrefill;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_0.LlamaQ4_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_0.decode.LlamaQ4_0FFNLayersDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_0.prefill.LlamaQ4_0LayersBatchPrefillNative;
@@ -14,7 +15,9 @@ import org.beehive.jitllm.backend.tornado.layers.type.q8_0.decode.LogitsQ8_0Laye
 import org.beehive.jitllm.backend.tornado.plan.components.BatchPrefillDecodeForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.StagedForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchDecodeActivation;
+import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchPrefillActivation;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchPrefillQ8DeviceActivation;
+import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.inference.state.LlamaState;
@@ -72,23 +75,35 @@ public class LlamaQ4_0PlanComponents
 
     @Override
     public ActivationTaskGraph batchPrefillActivation(int batchSize) {
-        // The embedding is Q8_0 (materialized from Q4_0 or Q6_K): decoded on the device.
-        return new BatchPrefillQ8DeviceActivation(state, config, batchSize);
+        // Metal: the host decodes the Q4_0 embeddings into the FP32 batch carrier for the
+        // SIMD-group layers. CUDA: the embedding is Q8_0 (materialized from Q4_0 or Q6_K),
+        // decoded on the device for the cuBLAS layers.
+        return BatchPrefillGemmPolicy.simdgroup()
+                ? new BatchPrefillActivation(state, config, batchSize, true)
+                : new BatchPrefillQ8DeviceActivation(state, config, batchSize);
     }
 
     @Override
     public ActivationTaskGraph batchDecodeActivation(String lastBatchLayerId) {
-        return new BatchDecodeActivation(state, config, lastBatchLayerId, true);
+        return BatchPrefillGemmPolicy.simdgroup()
+                ? new BatchDecodeActivation(state, config, lastBatchLayerId, true, true)
+                : new BatchDecodeActivation(state, config, lastBatchLayerId, true);
     }
 
     @Override
     public TransformerLayerTaskGraphs batchDecodeTransformerLayers() {
+        if (BatchPrefillGemmPolicy.simdgroup()) {
+            return new org.beehive.jitllm.backend.tornado.layers.llama.LlamaQ4_0FFNLayersDecode(
+                    "decode", state, weights, config, schedulerType);
+        }
         return new LlamaQ4_0FFNLayersDecode("decode", state, weights, config, schedulerType);
     }
 
     @Override
     public BatchPrefillTransformerLayerTaskGraphs batchPrefillTransformerLayers(int batchSize) {
-        return batchPrefillTransformerLayers(batchSize, 0, config.numberOfLayers());
+        return BatchPrefillGemmPolicy.simdgroup()
+                ? new LlamaQ4_0LayersBatchPrefill(state, weights, config, batchSize)
+                : batchPrefillTransformerLayers(batchSize, 0, config.numberOfLayers());
     }
 
     @Override

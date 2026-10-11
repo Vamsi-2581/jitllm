@@ -34,6 +34,8 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * (Q8_0, 96-wide heads) families. The FP32 key/value cache, the packed-half2 variant and the
  * non-split per-head kernel keep the kernels they had, as does the Qwen3.5 family (256-wide heads),
  * which has its own single-warp kernel.
+ * The FP32-cache kernels ({@link #laneCooperativeAttentionFp32Cache}) are a separate, Metal-only
+ * decision: Metal keeps the key/value cache in FP32.
  *
  * <p>Measured on one device, an RTX 5070 Ti (sm_120). The decision is a backend-level default
  * rather than a per-device measurement, and what it rests on is structural rather than incidental:
@@ -62,6 +64,9 @@ public final class LaneAttentionPolicy {
      */
     // @formatter:on
     public static final int WARPS_PER_GROUP = 16;
+
+    /** The 128-wide head the first lane-cooperative kernels were written for. */
+    public static final int SUPPORTED_HEAD_SIZE = 128;
 
     /**
      * Warps per (head, split) for the 64-wide kernel. Half the work per key of a 128-wide head, so
@@ -114,6 +119,17 @@ public final class LaneAttentionPolicy {
                     Integer,
                     Integer,
                     Integer> {}
+
+    // @formatter:off
+    /**
+     * Warps per (query token, head) in the batched-prefill lane-cooperative kernel. Prefill
+     * launches one workgroup per token and head, so there is no shortage of workgroups to hide
+     * latency with, and fewer warps per workgroup keep more of them resident. Measured on an M4
+     * Pro, Qwen3-0.6B F16, batch 256 (pp512 / pp2048 tok/s): 1 warp 1671 / 681, 2 1947 / 1024, 4
+     * 1961 / 1166, 8 1937 / 999, 16 1822 / 937.
+     */
+    // @formatter:on
+    public static final int PREFILL_WARPS_PER_GROUP = 4;
 
     private LaneAttentionPolicy() {}
 
@@ -181,5 +197,39 @@ public final class LaneAttentionPolicy {
                     default -> WARPS_PER_GROUP;
                 };
         return WorkerGridFactory.createLaneAttentionWorker(groups, warps);
+    }
+
+    // @formatter:off
+    /**
+     * Whether split-KV decode attention over the FP32 cache runs the lane-cooperative kernel.
+     *
+     * <p>Granted where {@link DeviceCapability#SUBGROUP_SHUFFLE_32} holds (Metal), whose FP32 cache
+     * otherwise runs {@code processHeadsFlashAttentionSplitKVPaged32}: one thread per key, each
+     * reading a whole key row and folding a 128-wide accumulator through threadgroup memory for
+     * every key. Same 128-wide precondition as {@link #laneCooperativeAttention}. CUDA's FP32 cache
+     * keeps its kernel; it was not measured there.
+     */
+    // @formatter:on
+    public static boolean laneCooperativeAttentionFp32Cache(int headSize) {
+        return headSize == SUPPORTED_HEAD_SIZE
+                && TornadoDevices.target()
+                        .capabilities()
+                        .supports(DeviceCapability.SUBGROUP_SHUFFLE_32);
+    }
+
+    /** The narrower head width the FP32-cache lane-cooperative kernel also has a variant for. */
+    public static final int NARROW_HEAD_SIZE = 64;
+
+    /**
+     * {@link #laneCooperativeAttentionFp32Cache} for a layer stack that installs the kernel
+     * matching its head width: {@code processHeadsFlashAttentionSplitKVPagedLaneHead128} for 128,
+     * {@code processHeadsFlashAttentionSplitKVPagedLaneHead64} for 64 (lane {@code L} owns
+     * dimensions {@code 2L} and {@code 2L+1}). Any other width keeps its kernel.
+     */
+    public static boolean laneCooperativeAttentionFp32CacheAnyHead(int headSize) {
+        return (headSize == SUPPORTED_HEAD_SIZE || headSize == NARROW_HEAD_SIZE)
+                && TornadoDevices.target()
+                        .capabilities()
+                        .supports(DeviceCapability.SUBGROUP_SHUFFLE_32);
     }
 }

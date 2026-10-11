@@ -42,6 +42,15 @@ public interface Device {
     }
 
     /**
+     * Bytes of local (shared, threadgroup) memory one workgroup may use, as the runtime reports it,
+     * or 0 when unknown. A kernel whose local arrays scale with its workgroup size asks this to
+     * pick a size whose arrays fit: a device refuses to build a kernel that asks for more.
+     */
+    default long localMemoryBytes() {
+        return 0L;
+    }
+
+    /**
      * Bytes of header this backend's native arrays carry in front of their elements.
      *
      * <p>A <b>layout</b> fact, not a capability: nothing branches on it, and the one caller needs
