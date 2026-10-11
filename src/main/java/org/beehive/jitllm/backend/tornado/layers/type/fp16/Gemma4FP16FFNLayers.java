@@ -80,8 +80,8 @@ public class Gemma4FP16FFNLayers
     /**
      * @param batchedPlan whether these are the decode layers of the batched prefill/decode plan:
      *     layer 0 then reads its activation and the key/value caches from {@code decodeActivation},
-     *     and every layer the projections, RoPE tables and per-layer projection norm the batch-prefill
-     *     graphs already uploaded
+     *     and every layer the projections, RoPE tables and per-layer projection norm the
+     *     batch-prefill graphs already uploaded
      */
     public Gemma4FP16FFNLayers(
             String taskGraphName,
