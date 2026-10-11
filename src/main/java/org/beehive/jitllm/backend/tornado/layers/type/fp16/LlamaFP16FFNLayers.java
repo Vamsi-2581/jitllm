@@ -4,8 +4,8 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
-import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
+import org.beehive.jitllm.backend.tornado.scheduling.SchedulerDetectionService;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.LlamaState;
@@ -123,15 +123,11 @@ public class LlamaFP16FFNLayers
         for (int i = 0; i < config.numberOfLayers(); i++) {
             String l = layerGraphName(i) + "." + layerTaskPrefix(i);
             // === Attention Block ===
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attn_rms_apply_fp16", rmsNormWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_apply_fp16", rmsNormWorker);
             tornadoForwardScheduler.addWorkerGrid(l + "qkv_projection", fusedQKVWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "rope_and_kv_cache", ropeWithCacheWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attention", parallelAttentionWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "rope_and_kv_cache", ropeWithCacheWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
             if (splitKvAttentionEnabled()) {
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attention_combine", attentionCombineWorker);
@@ -139,8 +135,7 @@ public class LlamaFP16FFNLayers
             tornadoForwardScheduler.addWorkerGrid(
                     l + "attn_output_proj", configDimRowMajorGlobalWorker);
             // === FFN Block ===
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "ffn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
             tornadoForwardScheduler.addWorkerGrid(
                     l + "rms_ffn_gate_up", configHiddenDimRowMajorWorker);
             tornadoForwardScheduler.addWorkerGrid(
@@ -195,7 +190,8 @@ public class LlamaFP16FFNLayers
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         // === Data Setup ===
         // consumeFromDevice for wrapX: the no-arg form uses the current graph's own name as the

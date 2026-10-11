@@ -114,7 +114,8 @@ public class Qwen2Q8_0FFNLayers
                         PackedActivationTasks.projectionWorker(
                                 config.dim() + 2 * config.kvDim(), PACKED_LOCAL));
                 tornadoForwardScheduler.addWorkerGrid(
-                        l + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
+                        l + "attn_out_quantize",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_output_proj",
                         PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
@@ -130,7 +131,8 @@ public class Qwen2Q8_0FFNLayers
                         l + "ffn_down_proj",
                         PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
             } else {
-                tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_qkv_projection", fusedQKVWorker);
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attn_rms_qkv_projection", fusedQKVWorker);
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_output_proj", configDimRowMajorGlobalWorker);
                 tornadoForwardScheduler.addWorkerGrid(
@@ -169,7 +171,8 @@ public class Qwen2Q8_0FFNLayers
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
         boolean packed = PackedActivationTasks.enabled();
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         if (firstInGraph) {
             unifiedLayer.consumeFromDevice(state.workspace.wrapX);

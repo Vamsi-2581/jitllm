@@ -23,10 +23,9 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * <p>The shape half is not a preference at all but a hard precondition. There is one kernel per
  * head width: the 128-wide one assigns lane {@code L} the head dimensions {@code 2L}, {@code 2L+1},
  * {@code 64+2L}, {@code 64+2L+1}, the 96-wide one {@code 2L}, {@code 2L+1} and {@code 64+L}, the
- * 64-wide one {@code 2L} and {@code 2L+1}, each a correct
- * partition of exactly that width across exactly 32 lanes. Any other width is not slower, it is
- * wrong, so the check is an equality and not a heuristic. This class is the one place that maps a
- * head width to its kernel and its grid.
+ * 64-wide one {@code 2L} and {@code 2L+1}, each a correct partition of exactly that width across
+ * exactly 32 lanes. Any other width is not slower, it is wrong, so the check is an equality and not
+ * a heuristic. This class is the one place that maps a head width to its kernel and its grid.
  *
  * <h2>Scope</h2>
  *
@@ -133,10 +132,13 @@ public final class LaneAttentionPolicy {
     /** The kernel for {@code headSize}, which {@link #laneCooperativeAttention} admitted. */
     public static Kernel kernel(int headSize) {
         return switch (headSize) {
-            case 64 -> TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64;
-            case 96 -> TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead96;
+            case 64 ->
+                    TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64;
+            case 96 ->
+                    TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead96;
             case 128 ->
-                    TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128;
+                    TransformerPagedKvKernels
+                            ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128;
             default ->
                     throw new IllegalArgumentException(
                             "no lane-cooperative attention kernel for head width " + headSize);
@@ -144,24 +146,29 @@ public final class LaneAttentionPolicy {
     }
 
     /**
-     * Whether a lane-cooperative kernel that takes its score scale exists for this head width:
-     * for a family whose attention multiplier is not {@code 1/sqrt(headSize)}.
+     * Whether a lane-cooperative kernel that takes its score scale exists for this head width: for
+     * a family whose attention multiplier is not {@code 1/sqrt(headSize)}.
      */
     public static boolean scaledLaneCooperativeAttention(int headSize) {
         return (headSize == 64 || headSize == 128) && laneCooperativeAttention(headSize);
     }
 
-    /** The scaled kernel for {@code headSize}, which {@link #scaledLaneCooperativeAttention} admitted. */
+    /**
+     * The scaled kernel for {@code headSize}, which {@link #scaledLaneCooperativeAttention}
+     * admitted.
+     */
     public static ScaledKernel scaledKernel(int headSize) {
         return switch (headSize) {
             case 64 ->
-                    TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64Scaled;
+                    TransformerPagedKvKernels
+                            ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead64Scaled;
             case 128 ->
                     TransformerPagedKvKernels
                             ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128Scaled;
             default ->
                     throw new IllegalArgumentException(
-                            "no scaled lane-cooperative attention kernel for head width " + headSize);
+                            "no scaled lane-cooperative attention kernel for head width "
+                                    + headSize);
         };
     }
 

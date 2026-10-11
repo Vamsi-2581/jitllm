@@ -825,7 +825,6 @@ public class TransformerPagedKvKernels {
         float q2 = q.get(qBase + dB);
         float q3 = q.get(qBase + dB + 1);
 
-
         float acc0 = 0.0f;
         float acc1 = 0.0f;
         float acc2 = 0.0f;

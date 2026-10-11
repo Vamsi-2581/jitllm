@@ -4,8 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
-import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import java.util.List;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;

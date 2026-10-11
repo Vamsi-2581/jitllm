@@ -68,7 +68,8 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
             return;
         }
         int end = endLayer(numLayers);
-        List<ImmutableTaskGraph> graphs = new ArrayList<>((end - firstLayer + perGraph - 1) / perGraph);
+        List<ImmutableTaskGraph> graphs =
+                new ArrayList<>((end - firstLayer + perGraph - 1) / perGraph);
         for (int first = firstLayer; first < end; first += perGraph) {
             int last = Math.min(first + perGraph, end) - 1;
             TaskGraph graph = null;

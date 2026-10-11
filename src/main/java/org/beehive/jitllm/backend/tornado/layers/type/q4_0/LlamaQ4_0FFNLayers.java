@@ -109,7 +109,8 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         if (firstInGraph) {
             String wrapXSrc = predecessorGraphName(layerIndex);
@@ -483,7 +484,6 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
         return packedWorker(rows);
     }
 
-
     /**
      * The Q8_0 schedule plus a grid for {@code ffn_rms_apply}, and {@code ffn_gate_up} in place of
      * {@code rms_ffn_gate_up}.
@@ -521,7 +521,8 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                 String layer = layerGraphName(i) + "." + layerTaskPrefix(i);
                 tornadoForwardScheduler.addWorkerGrid(layer + "attn_rms_reduce", rmsReduceWorker);
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
+                        layer + "attn_rms_apply",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "q_proj", packedWorker(config.dim(), weights.wqLayered[i], false));
                 tornadoForwardScheduler.addWorkerGrid(
@@ -535,41 +536,55 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
                 tornadoForwardScheduler.addWorkerGrid(layer + "attention", parallelAttentionWorker);
                 addAttentionCombineGrid(tornadoForwardScheduler, i);
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
+                        layer + "attn_out_quantize",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "attn_output_proj",
                         packedWorker(config.dim(), weights.woLayered[i], false));
                 tornadoForwardScheduler.addWorkerGrid(layer + "ffn_rms_reduce", rmsReduceWorker);
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "ffn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
+                        layer + "ffn_rms_apply",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "ffn_gate_up",
                         packedWorker(config.hiddenDim(), weights.w1Layered[i], true));
                 tornadoForwardScheduler.addWorkerGrid(
-                        layer + "ffn_down_quantize", PackedActivationTasks.quantizeWorker(config.hiddenDim()));
+                        layer + "ffn_down_quantize",
+                        PackedActivationTasks.quantizeWorker(config.hiddenDim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         layer + "ffn_down_proj",
                         packedWorker(config.dim(), weights.w2Layered[i], false));
                 continue;
             }
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid(layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_rms_apply", rmsNormWorker);
-            tornadoForwardScheduler.addWorkerGrid(layerGraphName(i) + "." + layerTaskPrefix(i) + "qkv_projection", fusedQkvWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_rms_reduce",
+                    rmsReduceWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "rope_and_kv_cache", ropeWithCacheWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_rms_apply", rmsNormWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attention", parallelAttentionWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "qkv_projection",
+                    fusedQkvWorker);
+            tornadoForwardScheduler.addWorkerGrid(
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "rope_and_kv_cache",
+                    ropeWithCacheWorker);
+            tornadoForwardScheduler.addWorkerGrid(
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attention",
+                    parallelAttentionWorker);
             addAttentionCombineGrid(tornadoForwardScheduler, i);
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_output_proj", configDimRowMajorGlobalWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "attn_output_proj",
+                    configDimRowMajorGlobalWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid(layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_rms_apply", rmsNormWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_rms_reduce",
+                    rmsReduceWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_gate_up", configHiddenDimRowMajorWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_rms_apply", rmsNormWorker);
             tornadoForwardScheduler.addWorkerGrid(
-                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_down_proj", configDimRowMajorGlobalWorker);
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_gate_up",
+                    configHiddenDimRowMajorWorker);
+            tornadoForwardScheduler.addWorkerGrid(
+                    layerGraphName(i) + "." + layerTaskPrefix(i) + "ffn_down_proj",
+                    configDimRowMajorGlobalWorker);
         }
 
         return tornadoForwardScheduler;

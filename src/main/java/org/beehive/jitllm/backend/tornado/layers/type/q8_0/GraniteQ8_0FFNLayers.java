@@ -42,7 +42,8 @@ public class GraniteQ8_0FFNLayers
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
         boolean packed = PackedActivationTasks.enabled();
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         // === Data Setup ===
         if (firstInGraph) {
@@ -184,10 +185,15 @@ public class GraniteQ8_0FFNLayers
         if (packed) {
             // The attention output is a new activation: quantized fresh for the projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, tp + "attn_out_quantize", context, state.workspace, state.workspace.wrapXb);
+                    unifiedLayer,
+                    tp + "attn_out_quantize",
+                    context,
+                    state.workspace,
+                    state.workspace.wrapXb);
             unifiedLayer.task(
                     tp + "attn_output_proj",
-                    TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithScaledResidualQ8_0DP4A,
+                    TransformerComputeKernelsQ8_0DP4A
+                            ::matrixVectorGenericWithScaledResidualQ8_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
                     state.workspace.wrapXbScales,
@@ -255,10 +261,15 @@ public class GraniteQ8_0FFNLayers
                     PACKED_LOCAL);
             // SwiGLU's output, quantized fresh for the down projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, tp + "ffn_down_quantize", context, state.workspace, state.workspace.wrapHb);
+                    unifiedLayer,
+                    tp + "ffn_down_quantize",
+                    context,
+                    state.workspace,
+                    state.workspace.wrapHb);
             unifiedLayer.task(
                     tp + "ffn_down_proj",
-                    TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithScaledResidualQ8_0DP4A,
+                    TransformerComputeKernelsQ8_0DP4A
+                            ::matrixVectorGenericWithScaledResidualQ8_0DP4A,
                     context,
                     state.workspace.wrapXbQuants,
                     state.workspace.wrapXbScales,
@@ -423,7 +434,8 @@ public class GraniteQ8_0FFNLayers
                         PackedActivationTasks.projectionWorker(
                                 config.dim() + 2 * config.kvDim(), PACKED_LOCAL));
                 tornadoForwardScheduler.addWorkerGrid(
-                        l + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
+                        l + "attn_out_quantize",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_output_proj",
                         PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
@@ -454,7 +466,8 @@ public class GraniteQ8_0FFNLayers
                         l + "attention",
                         LaneAttentionPolicy.worker(
                                 config.numberOfHeads() * State.SPLIT_KV, config.headSize()));
-                tornadoForwardScheduler.addWorkerGrid(l + "attention_combine", parallelAttentionWorker);
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attention_combine", parallelAttentionWorker);
             } else {
                 tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
             }

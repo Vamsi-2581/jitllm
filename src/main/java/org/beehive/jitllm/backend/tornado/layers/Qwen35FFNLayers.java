@@ -872,7 +872,8 @@ public class Qwen35FFNLayers
     @Override
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         return appendLayer(
-                existing != null ? existing : new TaskGraph(layerGraphName(layerIndex)), layerIndex);
+                existing != null ? existing : new TaskGraph(layerGraphName(layerIndex)),
+                layerIndex);
     }
 
     // @formatter:off

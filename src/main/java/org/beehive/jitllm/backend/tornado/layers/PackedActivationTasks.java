@@ -26,8 +26,8 @@ public final class PackedActivationTasks {
 
     /**
      * Pins the floating-point projections where a family would otherwise take the packed ones. For
-     * the tests whose subject is addressing rather than arithmetic: they compare the device
-     * against the host exactly, which a quantized activation cannot do. Not a user option.
+     * the tests whose subject is addressing rather than arithmetic: they compare the device against
+     * the host exactly, which a quantized activation cannot do. Not a user option.
      */
     public static final String DISABLE_PROPERTY = "jitllm.qwen35.packedIntegerDot";
 
@@ -35,9 +35,7 @@ public final class PackedActivationTasks {
 
     /** Whether the target device lowers {@code dp4a}. */
     public static boolean supported() {
-        return TornadoDevices.target()
-                .capabilities()
-                .supports(DeviceCapability.PACKED_INTEGER_DOT);
+        return TornadoDevices.target().capabilities().supports(DeviceCapability.PACKED_INTEGER_DOT);
     }
 
     /** {@link #supported()}, unless {@link #DISABLE_PROPERTY} is {@code false}. */

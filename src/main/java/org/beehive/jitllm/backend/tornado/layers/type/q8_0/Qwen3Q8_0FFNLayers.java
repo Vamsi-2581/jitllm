@@ -68,14 +68,13 @@ public class Qwen3Q8_0FFNLayers
      * How many adjacent transformer layers one decode graph holds.
      *
      * <p>Every graph submission ends in a device wait, so the graphs of a token are separated by a
-     * host round trip each; holding several layers in one graph removes all but one of those
-     * round trips per group, for the same tasks in the same order over the same buffers.
+     * host round trip each; holding several layers in one graph removes all but one of those round
+     * trips per group, for the same tasks in the same order over the same buffers.
      *
      * <p>Seven, measured on an A10 with Qwen3-0.6B (28 layers, so four full graphs): tg128 at depth
      * 0 and 680 reads 330 / 305 tok/s at one layer per graph and 372 / 339, 375 / 342, 373 / 338,
      * 372 / 340 at five, seven, ten and thirteen. Past five the remaining submissions cost little,
-     * and seven keeps each graph well inside TornadoVM's fixed 8192-byte per-graph bytecode
-     * buffer.
+     * and seven keeps each graph well inside TornadoVM's fixed 8192-byte per-graph bytecode buffer.
      */
     // @formatter:on
     @Override
@@ -180,8 +179,7 @@ public class Qwen3Q8_0FFNLayers
                     l + "attention",
                     isMetalBackend ? attentionCombineWorker : parallelAttentionWorker);
             if (!isMetalBackend) {
-                gridScheduler.addWorkerGrid(
-                        l + "attention_combine", attentionCombineWorker);
+                gridScheduler.addWorkerGrid(l + "attention_combine", attentionCombineWorker);
             }
             gridScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
             if (shouldUseFinalNormalization()) {

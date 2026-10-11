@@ -81,9 +81,11 @@ public class Phi3Q8_0FFNLayers
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
-                        l + "qkv_projection", PackedActivationTasks.projectionWorker(opSize, PACKED_LOCAL));
+                        l + "qkv_projection",
+                        PackedActivationTasks.projectionWorker(opSize, PACKED_LOCAL));
                 tornadoForwardScheduler.addWorkerGrid(
-                        l + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
+                        l + "attn_out_quantize",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_output_proj",
                         PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
@@ -113,7 +115,8 @@ public class Phi3Q8_0FFNLayers
                         l + "attention",
                         LaneAttentionPolicy.worker(
                                 config.numberOfHeads() * State.SPLIT_KV, config.headSize()));
-                tornadoForwardScheduler.addWorkerGrid(l + "attention_combine", parallelAttentionWorker);
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attention_combine", parallelAttentionWorker);
             } else {
                 tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
             }
@@ -185,7 +188,8 @@ public class Phi3Q8_0FFNLayers
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
         boolean packed = PackedActivationTasks.enabled();
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         if (firstInGraph) {
             unifiedLayer.consumeFromDevice(phi3State.workspace.wrapX);
@@ -381,7 +385,11 @@ public class Phi3Q8_0FFNLayers
         if (packed) {
             // The attention output is a new activation: quantized fresh for the projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, tp + "attn_out_quantize", context, phi3State.workspace, phi3State.workspace.wrapXb);
+                    unifiedLayer,
+                    tp + "attn_out_quantize",
+                    context,
+                    phi3State.workspace,
+                    phi3State.workspace.wrapXb);
             unifiedLayer.task(
                     tp + "attn_output_proj",
                     TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
@@ -453,7 +461,11 @@ public class Phi3Q8_0FFNLayers
                     PACKED_LOCAL);
             // SwiGLU's output, quantized fresh for the down projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, tp + "ffn_down_quantize", context, phi3State.workspace, phi3State.workspace.wrapHbU);
+                    unifiedLayer,
+                    tp + "ffn_down_quantize",
+                    context,
+                    phi3State.workspace,
+                    phi3State.workspace.wrapHbU);
             unifiedLayer.task(
                     tp + "ffn_down_proj",
                     TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,

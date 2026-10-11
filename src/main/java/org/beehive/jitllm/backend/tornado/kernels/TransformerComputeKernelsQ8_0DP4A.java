@@ -169,8 +169,8 @@ public final class TransformerComputeKernelsQ8_0DP4A {
 
     /**
      * The Q, K and V projections of one quantized activation from a single combined weight, rows
-     * {@code [0, qDim)} Q, the next {@code kvDim} K and the last {@code kvDim} V (Phi-3's
-     * {@code wqkv}).
+     * {@code [0, qDim)} Q, the next {@code kvDim} K and the last {@code kvDim} V (Phi-3's {@code
+     * wqkv}).
      *
      * <p>Worker: {@code (qDim + 2 kvDim) * localWorkGroupSize} lanes, local {@code
      * localWorkGroupSize}, a multiple of 32.
@@ -225,7 +225,15 @@ public final class TransformerComputeKernelsQ8_0DP4A {
             float gate =
                     rowDot(context, xQuants, xScales, wUp, n, rowId, localWorkGroupSize, gateSums);
             float up =
-                    rowDot(context, xQuants, xScales, wUp, n, d + rowId, localWorkGroupSize, upSums);
+                    rowDot(
+                            context,
+                            xQuants,
+                            xScales,
+                            wUp,
+                            n,
+                            d + rowId,
+                            localWorkGroupSize,
+                            upSums);
             if (context.localIdx == 0) {
                 float silu = gate / (1.0f + TornadoMath.exp(-gate));
                 hb.set(rowId, silu * up);

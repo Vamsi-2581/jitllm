@@ -94,7 +94,8 @@ public class LlamaQ8_0FFNLayers
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         // === Data Setup ===
         if (firstInGraph) {
@@ -227,7 +228,11 @@ public class LlamaQ8_0FFNLayers
         if (packed) {
             // The attention output is a new activation: quantized fresh for the projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, tp + "attn_out_quantize", context, state.workspace, state.workspace.wrapXb);
+                    unifiedLayer,
+                    tp + "attn_out_quantize",
+                    context,
+                    state.workspace,
+                    state.workspace.wrapXb);
             unifiedLayer.task(
                     tp + "attn_output_proj",
                     TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
@@ -296,7 +301,11 @@ public class LlamaQ8_0FFNLayers
                     PACKED_LOCAL);
             // SwiGLU's output, quantized fresh for the down projection.
             PackedActivationTasks.quantize(
-                    unifiedLayer, tp + "ffn_down_quantize", context, state.workspace, state.workspace.wrapHb);
+                    unifiedLayer,
+                    tp + "ffn_down_quantize",
+                    context,
+                    state.workspace,
+                    state.workspace.wrapHb);
             unifiedLayer.task(
                     tp + "ffn_down_proj",
                     TransformerComputeKernelsQ8_0DP4A::matrixVectorGenericWithResidualQ8_0DP4A,
@@ -472,8 +481,7 @@ public class LlamaQ8_0FFNLayers
             String l = layerGraphName(i) + "." + layerTaskPrefix(i);
             // --- Attention Block ---
             // RMS Normalization
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_reduce", rmsReduceWorker);
             if (packed) {
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_rms_apply", PackedActivationTasks.quantizeWorker(config.dim()));
@@ -481,7 +489,8 @@ public class LlamaQ8_0FFNLayers
                         l + "qkv_projection",
                         PackedActivationTasks.projectionWorker(qkvRows, PACKED_LOCAL));
                 tornadoForwardScheduler.addWorkerGrid(
-                        l + "attn_out_quantize", PackedActivationTasks.quantizeWorker(config.dim()));
+                        l + "attn_out_quantize",
+                        PackedActivationTasks.quantizeWorker(config.dim()));
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "attn_output_proj",
                         PackedActivationTasks.projectionWorker(config.dim(), PACKED_LOCAL));
@@ -506,15 +515,12 @@ public class LlamaQ8_0FFNLayers
                 tornadoForwardScheduler.addWorkerGrid(
                         l + "ffn_down_proj", configDimRowMajorGlobalWorker);
             }
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "rope_and_kv_cache", ropeWithCacheWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attention", parallelAttentionWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "rope_and_kv_cache", ropeWithCacheWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
             addAttentionCombineGrid(tornadoForwardScheduler, i);
             // --- FFN Block ---
             // RMS Normalization
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "ffn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
         }
 
         return tornadoForwardScheduler;

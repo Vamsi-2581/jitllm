@@ -126,23 +126,18 @@ public class Qwen2FP16FFNLayers
         boolean lane = laneAttention(config.headSize());
         for (int i = 0; i < config.numberOfLayers(); i++) {
             String l = layerGraphName(i) + "." + layerTaskPrefix(i);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attn_rms_qkv_projection", fusedQKVWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "fused_qkv_bias", fusedQKVBiasWorkerNorm);
+            tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_qkv_projection", fusedQKVWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "fused_qkv_bias", fusedQKVBiasWorkerNorm);
             tornadoForwardScheduler.addWorkerGrid(l + "rope_and_kv_cache", ropeWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "fused_qkv_bias", fusedQKVBiasWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "fused_qkv_bias", fusedQKVBiasWorker);
             tornadoForwardScheduler.addWorkerGrid(
                     l + "attn_output_proj", configDimRowMajorGlobalWorker);
             tornadoForwardScheduler.addWorkerGrid(
                     l + "ffn_down_proj", configDimRowMajorGlobalWorker);
             tornadoForwardScheduler.addWorkerGrid(
                     l + "fused_ffn_w1_w3", configHiddenDimRowMajorWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "attn_rms_reduce", rmsReduceWorker);
-            tornadoForwardScheduler.addWorkerGrid(
-                    l + "ffn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "attn_rms_reduce", rmsReduceWorker);
+            tornadoForwardScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
             tornadoForwardScheduler.addWorkerGrid(l + "mapContextFFN", rmsNormWorker);
             if (lane) {
                 tornadoForwardScheduler.addWorkerGrid(
@@ -213,7 +208,8 @@ public class Qwen2FP16FFNLayers
     protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
         boolean firstInGraph = existing == null;
         String tp = layerTaskPrefix(layerIndex);
-        TaskGraph unifiedLayer = firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
+        TaskGraph unifiedLayer =
+                firstInGraph ? new TaskGraph(layerGraphName(layerIndex)) : existing;
 
         if (firstInGraph) {
             unifiedLayer.consumeFromDevice(state.workspace.wrapX);
