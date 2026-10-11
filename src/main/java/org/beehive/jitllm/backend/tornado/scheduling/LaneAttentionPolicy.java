@@ -71,9 +71,11 @@ public final class LaneAttentionPolicy {
      */
     public static final int HEAD64_WARPS_PER_GROUP = 4;
 
-    /** Warps per (head, split) for the 96-wide kernel. */
-    public static final int HEAD96_WARPS_PER_GROUP =
-            Integer.getInteger("jitllm.debug.lane96Warps", 8);
+    /**
+     * Warps per (head, split) for the 96-wide kernel: eight measured fastest of four, eight and
+     * sixteen on an A10 (Phi-3-mini, tg128 at depths 0 and 680).
+     */
+    public static final int HEAD96_WARPS_PER_GROUP = 8;
 
     /** The signature of a lane-cooperative split-KV kernel that also takes the score scale. */
     public interface ScaledKernel
