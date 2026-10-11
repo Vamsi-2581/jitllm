@@ -466,7 +466,7 @@ public class Phi3Q8_0FFNLayers
         return LAYERS_PER_GRAPH;
     }
 
-    static final int LAYERS_PER_GRAPH = Integer.getInteger("jitllm.debug.phi3Group", 8);
+    static final int LAYERS_PER_GRAPH = 8;
 
     /** Lanes per output row of the packed projections: a multiple of 32. */
     private static final int PACKED_LOCAL = 64;
