@@ -22,4 +22,9 @@ public class GpuFp16KvGranite4Q8AccelTest {
     public void singleToken() throws Exception {
         GpuFp16KvPrecision.check("granite-4.0-1b-Q8_0.gguf", GpuFp16KvPrecision.Mode.SINGLE_TOKEN);
     }
+
+    @Test
+    public void batchedPrefill() throws Exception {
+        GpuFp16KvPrecision.checkBatchedOnMetal("granite-4.0-1b-Q8_0.gguf");
+    }
 }

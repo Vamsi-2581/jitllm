@@ -158,7 +158,13 @@ variants cover Phi-3's packed QKV and gate/up weights and Granite's scaled resid
 variants with FP16 activations write Gemma 4's packed QKV and gate/up rows. Attention over the
 FP32 cache runs on SIMD-group matrices too: `TransformerPagedKvBatchPrefillSimdgroupKernels`
 for 64-, 96- and 128-wide heads, and `Gemma4BatchPrefillSimdgroupAttentionKernels` for Gemma
-4's 256- and 512-wide heads. The SIMD-group kernels need TornadoVM's half-precision fragments,
+4's 256- and 512-wide heads; over the FP16 cache (the default) their twins
+`TransformerPagedKvBatchPrefillSimdgroupFP16Kernels` and
+`Gemma4BatchPrefillSimdgroupAttentionFP16Kernels` load key and value fragments as
+`simdgroup_half8x8`. The FP16 key/value cache is supported on Metal for every family above
+except Gemma 4 Q4_0, in single-token and batched prefill (and sequential prefill/decode for
+Llama, Qwen3 and Qwen3.5); rows, parity and FP16/FP32 speed are in
+[kv-cache-support.md](kv-cache-support.md#metal). The SIMD-group kernels need TornadoVM's half-precision fragments,
 transposed loads and vector-width array loads (`getFloat4` / `getHalf4`).
 `-Djitllm.metal.simdgroupGemm=false` and `-Djitllm.metal.simdgroupAttention=false` select the
 scalar kernels instead, where a family has them.
@@ -201,7 +207,8 @@ assuming the CUDA result carries over.
 | Model loading, device selection | yes | yes | yes | yes |
 | `STANDARD` single-token decode | yes | yes | yes | yes |
 | Sequential prefill/decode | yes | yes | yes | yes |
-| Batched prefill/decode | yes | yes (F16; Q8_0 blocked, see below) | yes | yes (SIMD-group kernels, FP32 cache) |
+| Batched prefill/decode | yes | yes (F16; Q8_0 blocked, see below) | yes | yes (SIMD-group kernels, FP16 or FP32 cache) |
+| FP16 key/value cache (the default) | yes | yes | NVIDIA-class devices | yes, except Gemma 4 Q4_0 ([matrix](kv-cache-support.md#metal)) |
 | F16 and Q8_0 weights | yes | yes | yes | yes |
 | Q4_K / Q6_K device residency | n/a | yes | yes | yes |
 | Q4_0 device residency (Llama) | n/a | yes | yes | yes |

@@ -7,6 +7,7 @@ import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupFP16Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
@@ -238,7 +239,17 @@ public class Qwen3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         if (useFp16KVCache()) {
             layer.task(
                     "batch_attention",
-                    TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionKVFP16Paged,
+                    simdgroupAttention()
+                            ? (nEmbdHead == 64
+                                    ? TransformerPagedKvBatchPrefillSimdgroupFP16Kernels
+                                            ::batchedFlashAttentionKVFP16PagedHead64
+                                    : nEmbdHead == 96
+                                            ? TransformerPagedKvBatchPrefillSimdgroupFP16Kernels
+                                                    ::batchedFlashAttentionKVFP16PagedHead96
+                                            : TransformerPagedKvBatchPrefillSimdgroupFP16Kernels
+                                                    ::batchedFlashAttentionKVFP16PagedHead128)
+                            : TransformerPagedKvBatchPrefillKernels
+                                    ::batchedFlashAttentionKVFP16Paged,
                     context,
                     state.workspace.batchStartPosHolder,
                     state.workspace.wrapQBatch,
@@ -496,8 +507,14 @@ public class Qwen3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                 && LaneAttentionPolicy.laneCooperativeAttentionFp32Cache(nEmbdHead);
     }
 
-    /** Attention over the FP32 cache on SIMD-group matrices; see {@link BatchPrefillGemmPolicy}. */
+    /**
+     * Attention on SIMD-group matrices; see {@link BatchPrefillGemmPolicy}. Over the FP32 cache
+     * where the lane-cooperative kernel would otherwise run; over the FP16 cache for every head
+     * width the FP16 SIMD-group kernels are written for.
+     */
     private boolean simdgroupAttention() {
-        return laneAttention() && BatchPrefillGemmPolicy.simdgroupAttention();
+        return useFp16KVCache()
+                ? BatchPrefillGemmPolicy.simdgroupAttention(nEmbdHead)
+                : laneAttention() && BatchPrefillGemmPolicy.simdgroupAttention();
     }
 }

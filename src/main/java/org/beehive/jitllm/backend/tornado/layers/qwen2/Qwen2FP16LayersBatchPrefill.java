@@ -7,6 +7,7 @@ import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupFP16Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
@@ -254,24 +255,88 @@ public class Qwen2FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
         }
 
         if (useFp16KVCache()) {
-            batchPrefillLayer.task(
-                    "batch_attention",
-                    TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionKVFP16Paged,
-                    context,
-                    state.workspace.batchStartPosHolder,
-                    state.workspace.wrapQBatch,
-                    state.workspace.wrapKeyCacheFP16,
-                    state.workspace.wrapValueCacheFP16,
-                    state.workspace.wrapXbBatch,
-                    config.numberOfHeads(),
-                    config.headSize(),
-                    kvDim,
-                    config.kvMul(),
-                    layerIndex,
-                    state.workspace.wrapBlockTable,
-                    state.kvBlockCfg,
-                    state.kvBlockStride,
-                    dim);
+            if (simdgroupAttention()) {
+                if (headSize() == 64) {
+                    batchPrefillLayer.task(
+                            "batch_attention",
+                            TransformerPagedKvBatchPrefillSimdgroupFP16Kernels
+                                    ::batchedFlashAttentionKVFP16PagedHead64,
+                            context,
+                            state.workspace.batchStartPosHolder,
+                            state.workspace.wrapQBatch,
+                            state.workspace.wrapKeyCacheFP16,
+                            state.workspace.wrapValueCacheFP16,
+                            state.workspace.wrapXbBatch,
+                            config.numberOfHeads(),
+                            config.headSize(),
+                            kvDim,
+                            config.kvMul(),
+                            layerIndex,
+                            state.workspace.wrapBlockTable,
+                            state.kvBlockCfg,
+                            state.kvBlockStride,
+                            dim);
+                } else if (headSize() == 96) {
+                    batchPrefillLayer.task(
+                            "batch_attention",
+                            TransformerPagedKvBatchPrefillSimdgroupFP16Kernels
+                                    ::batchedFlashAttentionKVFP16PagedHead96,
+                            context,
+                            state.workspace.batchStartPosHolder,
+                            state.workspace.wrapQBatch,
+                            state.workspace.wrapKeyCacheFP16,
+                            state.workspace.wrapValueCacheFP16,
+                            state.workspace.wrapXbBatch,
+                            config.numberOfHeads(),
+                            config.headSize(),
+                            kvDim,
+                            config.kvMul(),
+                            layerIndex,
+                            state.workspace.wrapBlockTable,
+                            state.kvBlockCfg,
+                            state.kvBlockStride,
+                            dim);
+                } else {
+                    batchPrefillLayer.task(
+                            "batch_attention",
+                            TransformerPagedKvBatchPrefillSimdgroupFP16Kernels
+                                    ::batchedFlashAttentionKVFP16PagedHead128,
+                            context,
+                            state.workspace.batchStartPosHolder,
+                            state.workspace.wrapQBatch,
+                            state.workspace.wrapKeyCacheFP16,
+                            state.workspace.wrapValueCacheFP16,
+                            state.workspace.wrapXbBatch,
+                            config.numberOfHeads(),
+                            config.headSize(),
+                            kvDim,
+                            config.kvMul(),
+                            layerIndex,
+                            state.workspace.wrapBlockTable,
+                            state.kvBlockCfg,
+                            state.kvBlockStride,
+                            dim);
+                }
+            } else {
+                batchPrefillLayer.task(
+                        "batch_attention",
+                        TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionKVFP16Paged,
+                        context,
+                        state.workspace.batchStartPosHolder,
+                        state.workspace.wrapQBatch,
+                        state.workspace.wrapKeyCacheFP16,
+                        state.workspace.wrapValueCacheFP16,
+                        state.workspace.wrapXbBatch,
+                        config.numberOfHeads(),
+                        config.headSize(),
+                        kvDim,
+                        config.kvMul(),
+                        layerIndex,
+                        state.workspace.wrapBlockTable,
+                        state.kvBlockCfg,
+                        state.kvBlockStride,
+                        dim);
+            }
         } else {
             if (simdgroupAttention()) {
                 if (headSize() == 64) {
@@ -610,11 +675,11 @@ public class Qwen2FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
     }
 
     /**
-     * SIMD-group attention over the FP32 cache; see {@link
+     * SIMD-group attention over either cache; see {@link
      * BatchPrefillGemmPolicy#simdgroupAttention(int)}.
      */
     private boolean simdgroupAttention() {
-        return !useFp16KVCache() && BatchPrefillGemmPolicy.simdgroupAttention(headSize());
+        return BatchPrefillGemmPolicy.simdgroupAttention(headSize());
     }
 
     private int headSize() {

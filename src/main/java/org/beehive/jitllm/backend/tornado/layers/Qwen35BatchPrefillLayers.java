@@ -2490,10 +2490,17 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
 
     /**
      * Whether attention runs the FP16 kernel that computes each query-key dot product once: the
-     * half-precision store, and the score scratch the state allocates alongside it.
+     * half-precision store, and the score scratch the state allocates alongside it. Not on Metal,
+     * where {@code attentionBatchFP16Paged}, the FP16 twin of the kernel the FP32 cache runs there,
+     * is the faster one (M4 Pro, Qwen3.5-0.8B Q4_0, batch 256, pp512 / pp2048 tok/s: 1821 / 947
+     * scored).
      */
     private boolean scoredAttention() {
-        return fp16Kv() && state.workspace.wrapAttnScoresBatch != null;
+        return fp16Kv()
+                && state.workspace.wrapAttnScoresBatch != null
+                && !org.beehive.jitllm.runtime.backend.BackendId.METAL.equals(
+                        org.beehive.jitllm.backend.tornado.device.TornadoDevices.current()
+                                .backend());
     }
 
     // ── worker grids ──────────────────────────────────────────────────────────
