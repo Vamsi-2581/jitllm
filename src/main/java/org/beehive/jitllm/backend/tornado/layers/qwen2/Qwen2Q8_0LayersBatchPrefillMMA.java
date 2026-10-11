@@ -16,10 +16,7 @@ import uk.ac.manchester.tornado.api.TaskGraph;
 public class Qwen2Q8_0LayersBatchPrefillMMA extends LlamaQ8_0LayersBatchPrefillMMA {
 
     public Qwen2Q8_0LayersBatchPrefillMMA(
-            Qwen2State state,
-            Qwen2TornadoWeights weights,
-            Configuration config,
-            int batchSize) {
+            Qwen2State state, Qwen2TornadoWeights weights, Configuration config, int batchSize) {
         super(state, weights, config, batchSize);
     }
 

@@ -19,14 +19,15 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 // @formatter:off
 /**
  * Qwen2-MoE's tensor-core batched prefill: Qwen2's attention on the tensor cores ({@link
- * Qwen2Q8_0LayersBatchPrefillMMA}), and a mixture-of-experts feed-forward in place of the dense one.
+ * Qwen2Q8_0LayersBatchPrefillMMA}), and a mixture-of-experts feed-forward in place of the dense
+ * one.
  *
  * <p>The feed-forward adds the attention output to the stream, normalizes and quantizes the chunk,
  * and routes it with Qwen2-MoE's own router and top-k: a softmax over every expert, the chosen
  * experts keeping their share of it unrenormalized, for any expert count. From the routed ids and
  * weights on it runs {@link Qwen35MoeBatchFeedForward}'s expert tasks: the assignments grouped by
- * expert, the grouped int8 tensor-core GEMMs over the stacked Q8_0 experts, the shared expert behind
- * its sigmoid gate, and the weighted combine into the residual stream.
+ * expert, the grouped int8 tensor-core GEMMs over the stacked Q8_0 experts, the shared expert
+ * behind its sigmoid gate, and the weighted combine into the residual stream.
  */
 // @formatter:on
 public class Qwen2MoEQ8_0LayersBatchPrefillMMA extends Qwen2Q8_0LayersBatchPrefillMMA {
