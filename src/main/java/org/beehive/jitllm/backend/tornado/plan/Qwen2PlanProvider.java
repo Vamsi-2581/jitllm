@@ -42,9 +42,9 @@ public final class Qwen2PlanProvider implements TornadoPlanProvider {
                 : new Qwen2Q8_0PlanComponents(typed, model);
     }
 
-    /** Single-token plans only, on the NVIDIA-class decode layers. */
+    /** Single-token and batched-prefill plans, on the NVIDIA-class decode layers. */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
-        return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
+        return Fp16KeyValueSupport.singleTokenAndBatchedNvidiaLayers(c);
     }
 }

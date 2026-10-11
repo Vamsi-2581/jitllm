@@ -43,4 +43,35 @@ public final class Qwen2BatchPrefillKernels {
             }
         }
     }
+
+    /**
+     * {@link #batchedQKVBias} over the packed {@code [q|k|v]} rows the tensor-core QKV GEMM writes:
+     * row {@code r} of token {@code t} sits at {@code t * (dim + 2 * kvDim) + r}. One thread per
+     * (token, output row); threads past {@code batch} tokens, and the GEMM's padding rows, are left
+     * alone.
+     */
+    public static void batchedPackedQKVBias(
+            KernelContext context,
+            FloatArray qkvBatch,
+            FloatArray qBias,
+            FloatArray kBias,
+            FloatArray vBias,
+            int dim,
+            int kvDim,
+            int batch) {
+        int index = context.globalIdx;
+        int rowsPerToken = dim + 2 * kvDim;
+        if (index < batch * rowsPerToken) {
+            int row = index % rowsPerToken;
+            float bias;
+            if (row < dim) {
+                bias = qBias.get(row);
+            } else if (row < dim + kvDim) {
+                bias = kBias.get(row - dim);
+            } else {
+                bias = vBias.get(row - dim - kvDim);
+            }
+            qkvBatch.set(index, qkvBatch.get(index) + bias);
+        }
+    }
 }

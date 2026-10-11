@@ -270,6 +270,38 @@ public class Fp16KeyValueSupportTest {
         }
     }
 
+    /**
+     * The tensor-core batched prefill of Qwen2 and Phi-3 writes the FP16 cache; their sequential
+     * plans do not.
+     */
+    @Test
+    public void tensorCoreBatchedPrefillTakesTheFp16Cache() {
+        for (String arch : new String[] {"qwen2", "deepseek-r1-distill-qwen", "phi3"}) {
+            for (DataType weights : new DataType[] {DataType.F16, DataType.Q8_0}) {
+                assertEquals(
+                        arch + " " + weights,
+                        Optional.empty(),
+                        check(
+                                arch,
+                                weights,
+                                ExecutionMode.BATCH_PREFILL_DECODE,
+                                BackendId.CUDA,
+                                true,
+                                true));
+                assertTrue(
+                        arch + " " + weights,
+                        check(
+                                        arch,
+                                        weights,
+                                        ExecutionMode.PREFILL_DECODE,
+                                        BackendId.CUDA,
+                                        true,
+                                        true)
+                                .isPresent());
+            }
+        }
+    }
+
     /** Without tensor cores batched prefill takes the scalar kernels, which have FP16 twins. */
     @Test
     public void scalarBatchedPrefillAndOpenClOnNvidiaAreSupported() {

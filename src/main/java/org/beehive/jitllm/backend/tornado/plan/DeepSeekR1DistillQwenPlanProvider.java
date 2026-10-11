@@ -42,9 +42,9 @@ public final class DeepSeekR1DistillQwenPlanProvider implements TornadoPlanProvi
                 : new Qwen2Q8_0PlanComponents(typed, model);
     }
 
-    /** Single-token plans only, on the NVIDIA-class decode layers. */
+    /** Qwen2's: single-token and batched-prefill plans, on the NVIDIA-class decode layers. */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
-        return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
+        return Fp16KeyValueSupport.singleTokenAndBatchedNvidiaLayers(c);
     }
 }

@@ -93,6 +93,17 @@ public final class Fp16KeyValueSupport {
                                         "the " + c.architecture() + " layers keep an FP32 cache"));
     }
 
+    /**
+     * The FP16 answer of a family whose single-token and batched-prefill layers write the FP16
+     * cache and whose sequential prefill/decode plan does not (Qwen2 and its distillations): F16
+     * and Q8_0 weights on the NVIDIA-class decode layers.
+     */
+    public static Optional<String> singleTokenAndBatchedNvidiaLayers(Combination c) {
+        return c.mode() == ExecutionMode.BATCH_PREFILL_DECODE
+                ? nvidiaDecodeLayers(c, false)
+                : singleTokenNvidiaLayers(c);
+    }
+
     // @formatter:off
     /**
      * The FP16 answer of the NVIDIA-class decode layers shared by Llama and Qwen3: F16 and Q8_0
