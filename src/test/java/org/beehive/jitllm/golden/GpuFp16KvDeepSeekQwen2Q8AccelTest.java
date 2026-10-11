@@ -10,4 +10,9 @@ public class GpuFp16KvDeepSeekQwen2Q8AccelTest {
         GpuFp16KvPrecision.check(
                 "DeepSeek-R1-Distill-Qwen-1.5B-Q8_0.gguf", GpuFp16KvPrecision.Mode.SINGLE_TOKEN);
     }
+
+    @Test
+    public void batchedPrefill() throws Exception {
+        GpuFp16KvPrecision.checkBatchedOnMetal("DeepSeek-R1-Distill-Qwen-1.5B-Q8_0.gguf");
+    }
 }

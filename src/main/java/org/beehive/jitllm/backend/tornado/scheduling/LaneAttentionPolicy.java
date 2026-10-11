@@ -70,15 +70,19 @@ public final class LaneAttentionPolicy {
     private LaneAttentionPolicy() {}
 
     /**
-     * Whether the lane-cooperative kernel may be used for this head width on the active device.
+     * Whether the lane-cooperative kernel may be used for this head width on the active device:
+     * CUDA, and Metal, where it is the FP16 cache's split-KV decode attention.
      *
      * @param headSize the model's head width; anything but {@link #SUPPORTED_HEAD_SIZE} is refused
      */
     public static boolean laneCooperativeAttention(int headSize) {
+        var capabilities = TornadoDevices.current().capabilities();
         return headSize == SUPPORTED_HEAD_SIZE
-                && TornadoDevices.current()
-                        .capabilities()
-                        .supports(DeviceCapability.SHUFFLE_REDUCED_FP16_GEMV);
+                && (capabilities.supports(DeviceCapability.SHUFFLE_REDUCED_FP16_GEMV)
+                        // Metal: the FP32-cache twin already runs there on the same shuffles, and
+                        // the 64-thread per-key FP16 kernel needs 34052 bytes of threadgroup
+                        // memory, past Metal's 32 KB.
+                        || capabilities.supports(DeviceCapability.SUBGROUP_SHUFFLE_32));
     }
 
     // @formatter:off

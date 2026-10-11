@@ -113,10 +113,12 @@ public class Qwen3FP16FFNLayers
         this.nEmbdGqa = nEmbdVGqa;
         this.gqa = config.numberOfHeads() / config.numberOfKeyValueHeads();
         // FP16 paged split-KV only; the packed-half2 variant and the FP32 cache keep their kernels.
+        // Metal has no room for the packed variant's 64-thread local arrays, so it keeps the lane
+        // kernel whatever the packed-half2 setting.
         this.laneAttention =
                 !singleWorkgroupAttention
                         && (useFp16KVCache()
-                                ? !packedHalf2Attention
+                                ? (!packedHalf2Attention || metalBackend())
                                         && LaneAttentionPolicy.laneCooperativeAttention(nEmbdHead)
                                 : LaneAttentionPolicy.laneCooperativeAttentionFp32Cache(nEmbdHead));
         setupFFNLayers();

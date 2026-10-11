@@ -62,7 +62,11 @@ public final class Fp16KeyValueSupport {
             // Every family reaches the host cache through FloatTensor, in every mode.
             return Optional.empty();
         }
-        // CUDA, and OpenCL on an NVIDIA-class device, where the FP16 kernels were measured.
+        if (BackendId.METAL.equals(c.backend())) {
+            return metal(c);
+        }
+        // CUDA, and OpenCL on an NVIDIA-class device, where the FP16 kernels were measured; Metal
+        // above.
         boolean verifiedBackend =
                 BackendId.CUDA.equals(c.backend())
                         || (BackendId.OPENCL.equals(c.backend()) && c.nvidiaDevice());
@@ -140,6 +144,64 @@ public final class Fp16KeyValueSupport {
                 return c.mode() == ExecutionMode.STANDARD
                         ? Optional.empty()
                         : Optional.of(c.architecture() + " has single-token plans only");
+            }
+            default -> {
+                return Optional.of("the " + c.architecture() + " layers keep an FP32 cache");
+            }
+        }
+    }
+
+    // @formatter:off
+    /**
+     * The Metal rows: each (family, weights, mode) measured against FP32 on an Apple M4 Pro with
+     * the {@code GpuFp16Kv*AccelTest} classes. Decode attention over the FP16 cache takes the
+     * lane-cooperative split-KV kernel for 128-wide heads (the 64-thread per-key kernel needs more
+     * than Metal's 32 KB of threadgroup memory) and the per-head flash kernels otherwise; batched
+     * prefill takes the FP16 SIMD-group attention kernels. Rows without a model file here stay
+     * refused: Gemma 4 Q4_0 and the families' sequential prefill/decode outside Llama, Qwen3 and
+     * Qwen3.5.
+     */
+    // @formatter:on
+    private static Optional<String> metal(Combination c) {
+        Optional<String> noBatchedPrefill = BatchPrefillSupport.unsupported(c);
+        if (noBatchedPrefill.isPresent()) {
+            return noBatchedPrefill;
+        }
+        boolean f16OrQ8 = c.weights() == DataType.F16 || c.weights() == DataType.Q8_0;
+        switch (c.architecture()) {
+            case "qwen35" -> {
+                return c.weights() == DataType.Q4_0
+                        ? Optional.empty()
+                        : Optional.of(
+                                "the qwen35 " + c.weights() + " layers are not verified on Metal");
+            }
+            case "gemma4" -> {
+                return c.weights() == DataType.Q8_0
+                        ? Optional.empty()
+                        : Optional.of(
+                                "the gemma4 "
+                                        + c.weights()
+                                        + " FP16 cache is not verified on Metal");
+            }
+            case "llama", "qwen3" -> {
+                boolean q4Llama = c.weights() == DataType.Q4_0 && c.architecture().equals("llama");
+                if (!f16OrQ8 && !q4Llama) {
+                    return Optional.of("the " + c.weights() + " layers keep an FP32 cache");
+                }
+                return q4Llama && c.mode() == ExecutionMode.PREFILL_DECODE
+                        ? Optional.of("Q4_0 has no sequential prefill/decode plan")
+                        : Optional.empty();
+            }
+            case "mistral", "qwen2", "deepseek-r1-distill-qwen", "phi3", "granite" -> {
+                if (!f16OrQ8) {
+                    return Optional.of("the " + c.weights() + " layers keep an FP32 cache");
+                }
+                return c.mode() == ExecutionMode.PREFILL_DECODE
+                        ? Optional.of(
+                                c.architecture()
+                                        + " has no verified FP16 sequential prefill/decode path on"
+                                        + " Metal")
+                        : Optional.empty();
             }
             default -> {
                 return Optional.of("the " + c.architecture() + " layers keep an FP32 cache");

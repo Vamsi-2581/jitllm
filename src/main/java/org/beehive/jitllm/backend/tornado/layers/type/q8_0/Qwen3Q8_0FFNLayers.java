@@ -350,7 +350,11 @@ public class Qwen3Q8_0FFNLayers
             if (useFp16KVCache()) {
                 unifiedLayer.task(
                         "attention",
-                        TransformerPagedKvKernels::processHeadsFlashAttentionSplitKVFP16Paged,
+                        laneAttention()
+                                ? TransformerPagedKvKernels
+                                        ::processHeadsFlashAttentionSplitKVFP16PagedLaneHead128
+                                : TransformerPagedKvKernels
+                                        ::processHeadsFlashAttentionSplitKVFP16Paged,
                         context,
                         qwen3State.workspace.wrapQ, // query vectors
                         qwen3State.workspace.wrapKeyCacheFP16, // key cache (FP16)
@@ -624,9 +628,14 @@ public class Qwen3Q8_0FFNLayers
      * the head width is set in the constructor, after field initializers run.
      */
     private boolean laneAttention() {
-        return !singleWorkgroupAttention
-                && !useFp16KVCache()
-                && LaneAttentionPolicy.laneCooperativeAttentionFp32Cache(nEmbdHead);
+        if (singleWorkgroupAttention) {
+            return false;
+        }
+        // The FP16 cache takes the lane kernel on Metal only, where the per-key FP16 kernel's
+        // 64-thread local arrays do not fit; CUDA keeps that kernel.
+        return useFp16KVCache()
+                ? metalBackend() && LaneAttentionPolicy.laneCooperativeAttention(nEmbdHead)
+                : LaneAttentionPolicy.laneCooperativeAttentionFp32Cache(nEmbdHead);
     }
 
     /** Without a separate finalize task on Metal; see {@link RmsReductionPolicy}. */

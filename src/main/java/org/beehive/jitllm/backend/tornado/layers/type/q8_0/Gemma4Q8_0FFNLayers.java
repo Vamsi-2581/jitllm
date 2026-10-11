@@ -447,9 +447,11 @@ public class Gemma4Q8_0FFNLayers
         int splits = attentionSplits();
         if (fp16KeyValue) {
             int slices = decodeSlices(isSwa);
-            // The shuffle kernel where the backend lowers simdShuffleDown; elsewhere its
-            // shared-memory twin, on the same workgroup, grid and partial layout.
-            if (SchedulerDetectionService.isShuffleReducedFp16GemvSupported()) {
+            // The shuffle kernel where the backend lowers simdShuffleDown (CUDA, and Metal's
+            // 32-wide SIMD-group shuffles); elsewhere its shared-memory twin, on the same
+            // workgroup, grid and partial layout.
+            if (SchedulerDetectionService.isShuffleReducedFp16GemvSupported()
+                    || SchedulerDetectionService.isSubgroupShuffle32Supported()) {
                 unifiedLayer.task(
                         tn(layerIndex, "attention_group"),
                         Gemma4AttentionKernels::attentionDecodeGroupFP16,
