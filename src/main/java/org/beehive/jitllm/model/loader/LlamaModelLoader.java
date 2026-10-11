@@ -277,8 +277,15 @@ public class LlamaModelLoader extends AbstractModelLoader<Llama, LlamaConfigurat
      * these seven are the ones a Q4_0 kernel would decode. {@code llama-quantize ... Q4_0} gives
      * some layers' {@code ffn_down} more bits as Q4_1 (10 of 80 in Llama-3.3-70B, 2 of 16 in
      * Llama-3.2-1B), and the layer graph has a Q4_1 kernel for exactly that projection.
+     *
+     * <p>Not on Metal: there a Q4_0 model's prompt is read by the SIMD-group batched prefill, which
+     * has Q4_0 kernels only, so a file with Q4_1 layers is materialized as Q8_0 instead.
      */
     private static boolean allQ4_0(Map<String, GGMLTensorEntry> tensorEntries, int layers) {
+        boolean q4_1DownAllowed =
+                !org.beehive.jitllm.runtime.backend.BackendId.METAL.equals(
+                        org.beehive.jitllm.backend.tornado.device.TornadoDevices.current()
+                                .backend());
         String[] kinds = {
             "attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_down", "ffn_up"
         };
@@ -286,7 +293,8 @@ public class LlamaModelLoader extends AbstractModelLoader<Llama, LlamaConfigurat
             for (String kind : kinds) {
                 GGMLTensorEntry entry = tensorEntries.get("blk." + layer + "." + kind + ".weight");
                 boolean q4_1Down =
-                        kind.equals("ffn_down")
+                        q4_1DownAllowed
+                                && kind.equals("ffn_down")
                                 && entry != null
                                 && entry.ggmlType() == GGMLType.Q4_1;
                 if (entry == null || (entry.ggmlType() != GGMLType.Q4_0 && !q4_1Down)) {
