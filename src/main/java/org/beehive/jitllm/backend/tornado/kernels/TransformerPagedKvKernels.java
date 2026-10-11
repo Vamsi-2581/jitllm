@@ -307,6 +307,166 @@ public class TransformerPagedKvKernels {
         }
     }
 
+    /**
+     * {@link #processHeadsFlashAttentionPaged} with 8-position key/value tiles, for heads whose
+     * 16-position tiles exceed Metal's 32 KB of threadgroup memory (a 256-wide head needs 33.8 KB).
+     */
+    public static void processHeadsFlashAttentionPagedTile8(
+            KernelContext context,
+            FloatArray q,
+            FloatArray key_cache,
+            FloatArray value_cache,
+            FloatArray xb,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride) {
+
+        // Thread and workgroup information
+        int tid = context.localIdx;
+        int h = context.groupIdx; // Each workgroup processes one head
+        int localSize = context.localGroupSizeX;
+
+        // Early exit if this workgroup is beyond our head count
+        // This relies on the kernel being launched with nHeads workgroups.
+        if (h >= nHeads) {
+            return;
+        }
+
+        int pos = positionHolder.get(0);
+        int slot = positionHolder.get(1);
+        int layerOff = KvBlockAddress.layerOffset(layer, kvDim, blockCfg);
+        int kvHeadIdx = h / kvMul;
+        int BLOCK_SIZE_C = 8;
+
+        // Allocate shared memory for tiled computation
+        float[] q_shared = context.allocateFloatLocalArray(headSize);
+        float[] k_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C * headSize);
+        float[] v_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C * headSize);
+        float[] s_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C);
+        float[] shared_tile_max_holder =
+                context.allocateFloatLocalArray(1); // FIX: For broadcasting tile max
+
+        // Thread-local accumulators for online softmax
+        float maxScore = Float.NEGATIVE_INFINITY;
+        float sumExp = 0.0f;
+
+        // Thread-local output accumulation
+        float[] output = new float[headSize];
+        for (int i = 0; i < headSize; i++) {
+            output[i] = 0.0f;
+        }
+
+        // Load query vector into shared memory
+        for (int i = tid; i < headSize; i += localSize) {
+            q_shared[i] = q.get(h * headSize + i);
+        }
+
+        context.localBarrier();
+
+        // Process sequence in tiles
+        for (int tileC = 0; tileC <= pos; tileC += BLOCK_SIZE_C) {
+            int tileEnd = Math.min(tileC + BLOCK_SIZE_C - 1, pos);
+
+            // Load key and value vectors for this tile
+            // Each thread loads a portion of the K and V vectors for the tile
+            for (int tIdxInSeq = tileC + tid; tIdxInSeq <= tileEnd; tIdxInSeq += localSize) {
+                int k_v_idx_in_tile = tIdxInSeq - tileC; // 0, 1, 2, or 3 for this tile
+                int tileMemOffset = k_v_idx_in_tile * headSize;
+                // The block walk depends on the position, not on d, so it is computed once
+                // per position. Keeping it inside the loop — where the legacy line that
+                // computed loff + pos*kvDim + d sat — costs a table load and an integer
+                // divide per element, which measured -7.3% on Qwen2 Q8_0.
+                int kvBase =
+                        KvBlockAddress.offset(
+                                        blockTable,
+                                        slot,
+                                        tIdxInSeq,
+                                        layerOff,
+                                        kvDim,
+                                        blockCfg,
+                                        blockStride)
+                                + kvHeadIdx * headSize;
+                for (int d = 0; d < headSize; d++) {
+                    k_tile[tileMemOffset + d] = key_cache.get(kvBase + d);
+                    v_tile[tileMemOffset + d] = value_cache.get(kvBase + d);
+                }
+            }
+
+            context.localBarrier();
+
+            // Compute attention scores for this tile
+            // Each thread computes one score for the tile
+            for (int tIdxInSeq = tileC + tid; tIdxInSeq <= tileEnd; tIdxInSeq += localSize) {
+                int score_idx_in_tile = tIdxInSeq - tileC; // 0, 1, 2, or 3 for this tile
+
+                float score = 0.0f;
+                for (int d = 0; d < headSize; d++) {
+                    score += q_shared[d] * k_tile[score_idx_in_tile * headSize + d];
+                }
+                score /= TornadoMath.sqrt(headSize);
+                s_tile[score_idx_in_tile] = score;
+            }
+
+            context.localBarrier();
+
+            // Find max score in this tile (all threads compute it redundantly over the small
+            // s_tile)
+            float tileLocalMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i <= tileEnd - tileC; i++) { // Iterate over valid scores in s_tile
+                if (s_tile[i] > tileLocalMax) {
+                    tileLocalMax = s_tile[i];
+                }
+            }
+
+            // Broadcast max to all threads via shared memory
+            if (tid == 0) {
+                shared_tile_max_holder[0] = tileLocalMax; // FIX: Use dedicated holder
+            }
+            context.localBarrier();
+            float currentTileMax = shared_tile_max_holder[0]; // FIX: Read from dedicated holder
+
+            // Determine if we need to rescale previous results
+            float newMax = Math.max(maxScore, currentTileMax);
+            if (newMax != maxScore && maxScore != Float.NEGATIVE_INFINITY) {
+                float scale = TornadoMath.exp(maxScore - newMax);
+                sumExp *= scale;
+                for (int d = 0; d < headSize; d++) {
+                    output[d] *= scale;
+                }
+            }
+            maxScore = newMax;
+
+            // Process each key-value pair using original scores from s_tile
+            // All threads iterate over all scores in the current tile
+            for (int t_idx_in_s_tile = 0; t_idx_in_s_tile <= tileEnd - tileC; t_idx_in_s_tile++) {
+                // s_tile[t_idx_in_s_tile] now correctly refers to the original score
+                float expScore = TornadoMath.exp(s_tile[t_idx_in_s_tile] - maxScore);
+                sumExp += expScore;
+
+                for (int d = 0; d < headSize; d++) {
+                    output[d] += expScore * v_tile[t_idx_in_s_tile * headSize + d];
+                }
+            }
+            context.localBarrier(); // Ensure all threads finish with s_tile, k_tile, v_tile before
+            // next tile load
+        }
+
+        // Normalize and write final results
+        float normFactor =
+                (sumExp > 0.0f)
+                        ? (1.0f / sumExp)
+                        : 0.0f; // Avoid division by zero, return 0 if sumExp is 0
+        for (int d = tid; d < headSize; d += localSize) {
+            xb.set(h * headSize + d, output[d] * normFactor);
+        }
+    }
+
     public static void processHeadsFlashAttentionFP16Paged(
             KernelContext context,
             FloatArray q,
@@ -336,6 +496,141 @@ public class TransformerPagedKvKernels {
         int layerOff = KvBlockAddress.layerOffset(layer, kvDim, blockCfg);
         int kvHeadIdx = h / kvMul;
         int BLOCK_SIZE_C = 16;
+
+        float[] q_shared = context.allocateFloatLocalArray(headSize);
+        float[] k_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C * headSize);
+        float[] v_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C * headSize);
+        float[] s_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C);
+        float[] shared_tile_max_holder = context.allocateFloatLocalArray(1);
+
+        float maxScore = Float.NEGATIVE_INFINITY;
+        float sumExp = 0.0f;
+
+        float[] output = new float[headSize];
+        for (int i = 0; i < headSize; i++) {
+            output[i] = 0.0f;
+        }
+
+        for (int i = tid; i < headSize; i += localSize) {
+            q_shared[i] = q.get(h * headSize + i);
+        }
+
+        context.localBarrier();
+
+        for (int tileC = 0; tileC <= pos; tileC += BLOCK_SIZE_C) {
+            int tileEnd = Math.min(tileC + BLOCK_SIZE_C - 1, pos);
+
+            // Packed 32-bit FP16 pair loads; expand to FP32 tiles in shared memory.
+            for (int tIdxInSeq = tileC + tid; tIdxInSeq <= tileEnd; tIdxInSeq += localSize) {
+                int tileMemOffset = (tIdxInSeq - tileC) * headSize;
+                int kvBase =
+                        KvBlockAddress.offset(
+                                        blockTable,
+                                        slot,
+                                        tIdxInSeq,
+                                        layerOff,
+                                        kvDim,
+                                        blockCfg,
+                                        blockStride)
+                                + kvHeadIdx * headSize;
+                for (int d = 0; d < headSize; d += 2) {
+                    Half2 kPair = key_cache.getHalf2(kvBase + d);
+                    Half2 vPair = value_cache.getHalf2(kvBase + d);
+                    k_tile[tileMemOffset + d] = Half2.lowFloat(kPair);
+                    k_tile[tileMemOffset + d + 1] = Half2.highFloat(kPair);
+                    v_tile[tileMemOffset + d] = Half2.lowFloat(vPair);
+                    v_tile[tileMemOffset + d + 1] = Half2.highFloat(vPair);
+                }
+            }
+
+            context.localBarrier();
+
+            for (int tIdxInSeq = tileC + tid; tIdxInSeq <= tileEnd; tIdxInSeq += localSize) {
+                int score_idx_in_tile = tIdxInSeq - tileC;
+
+                float score = 0.0f;
+                for (int d = 0; d < headSize; d++) {
+                    score += q_shared[d] * k_tile[score_idx_in_tile * headSize + d];
+                }
+                score /= TornadoMath.sqrt(headSize);
+                s_tile[score_idx_in_tile] = score;
+            }
+
+            context.localBarrier();
+
+            float tileLocalMax = Float.NEGATIVE_INFINITY;
+            for (int i = 0; i <= tileEnd - tileC; i++) {
+                if (s_tile[i] > tileLocalMax) {
+                    tileLocalMax = s_tile[i];
+                }
+            }
+
+            if (tid == 0) {
+                shared_tile_max_holder[0] = tileLocalMax;
+            }
+            context.localBarrier();
+            float currentTileMax = shared_tile_max_holder[0];
+
+            float newMax = Math.max(maxScore, currentTileMax);
+            if (newMax != maxScore && maxScore != Float.NEGATIVE_INFINITY) {
+                float scale = TornadoMath.exp(maxScore - newMax);
+                sumExp *= scale;
+                for (int d = 0; d < headSize; d++) {
+                    output[d] *= scale;
+                }
+            }
+            maxScore = newMax;
+
+            for (int t_idx_in_s_tile = 0; t_idx_in_s_tile <= tileEnd - tileC; t_idx_in_s_tile++) {
+                float expScore = TornadoMath.exp(s_tile[t_idx_in_s_tile] - maxScore);
+                sumExp += expScore;
+
+                for (int d = 0; d < headSize; d++) {
+                    output[d] += expScore * v_tile[t_idx_in_s_tile * headSize + d];
+                }
+            }
+            context.localBarrier();
+        }
+
+        float normFactor = (sumExp > 0.0f) ? (1.0f / sumExp) : 0.0f;
+        for (int d = tid; d < headSize; d += localSize) {
+            xb.set(h * headSize + d, output[d] * normFactor);
+        }
+    }
+
+    /**
+     * {@link #processHeadsFlashAttentionFP16Paged} with 8-position key/value tiles, for heads whose
+     * 16-position tiles exceed Metal's 32 KB of threadgroup memory (a 256-wide head needs 33.8 KB).
+     */
+    public static void processHeadsFlashAttentionFP16PagedTile8(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray xb,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride) {
+
+        int tid = context.localIdx;
+        int h = context.groupIdx;
+        int localSize = context.localGroupSizeX;
+
+        if (h >= nHeads) {
+            return;
+        }
+
+        int pos = positionHolder.get(0);
+        int slot = positionHolder.get(1);
+        int layerOff = KvBlockAddress.layerOffset(layer, kvDim, blockCfg);
+        int kvHeadIdx = h / kvMul;
+        int BLOCK_SIZE_C = 8;
 
         float[] q_shared = context.allocateFloatLocalArray(headSize);
         float[] k_tile = context.allocateFloatLocalArray(BLOCK_SIZE_C * headSize);

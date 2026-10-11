@@ -33,8 +33,8 @@ public class TornadoPlanRegistryTest {
                 Set.of(DataType.F16, DataType.Q8_0),
                 mistral.supportedDataTypes());
         assertEquals(
-                "STANDARD only, as the factory has always enforced",
-                Set.of(ExecutionMode.STANDARD),
+                "single-token and batched prefill/decode (Llama's layer graphs)",
+                Set.of(ExecutionMode.STANDARD, ExecutionMode.BATCH_PREFILL_DECODE),
                 mistral.supportedModes());
     }
 
@@ -47,16 +47,29 @@ public class TornadoPlanRegistryTest {
      * factory entry point and the refusal names the mode that was actually requested. This pins
      * that, so a future change cannot quietly make one mode answer for another.
      *
-     * <p>It also pins the scope. STANDARD_ONLY is a family-level declaration shared by Devstral,
-     * Qwen2 and Mistral; it is not specific to Devstral, and not specific to Q4_K — the dtype
-     * appears in the message text only because the message names the whole tuple.
+     * <p>It also pins the scope. STANDARD_ONLY is a family-level declaration (Devstral here; Qwen2
+     * and Mistral gained batched prefill since); it is not specific to Devstral, and not specific
+     * to Q4_K — the dtype appears in the message text only because the message names the whole
+     * tuple.
      */
     @Test
     public void everyStandardOnlyFamilyDeclaresStandardOnly() {
-        for (String architecture : Set.of("devstral", "qwen2", "mistral")) {
+        for (String architecture : Set.of("devstral")) {
             assertEquals(
                     architecture + " is STANDARD-only",
                     Set.of(ExecutionMode.STANDARD),
+                    provider(architecture).supportedModes());
+        }
+    }
+
+    /** Families with batched prefill but no sequential prefill/decode plan. */
+    @Test
+    public void batchedFamiliesDeclareStandardAndBatch() {
+        for (String architecture :
+                Set.of("qwen2", "deepseek-r1-distill-qwen", "mistral", "phi3", "granite")) {
+            assertEquals(
+                    architecture + " is STANDARD and BATCH_PREFILL_DECODE",
+                    Set.of(ExecutionMode.STANDARD, ExecutionMode.BATCH_PREFILL_DECODE),
                     provider(architecture).supportedModes());
         }
     }

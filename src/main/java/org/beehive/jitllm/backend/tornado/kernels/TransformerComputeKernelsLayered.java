@@ -1503,7 +1503,10 @@ public class TransformerComputeKernelsLayered {
      */
     public static float geluActivation(float x) {
         float x3 = x * x * x;
-        return 0.5f * x * (1.0f + TornadoMath.tanh((0.797885f * (x + 0.044715f * x3))));
+        // tanh is exactly +-1.0f in float beyond |a| ~ 9, so the clamp changes no result; it keeps
+        // Metal's fast-math tanh, which returns NaN for large arguments, in range.
+        float a = TornadoMath.min(TornadoMath.max(0.797885f * (x + 0.044715f * x3), -10.0f), 10.0f);
+        return 0.5f * x * (1.0f + TornadoMath.tanh(a));
     }
 
     /**

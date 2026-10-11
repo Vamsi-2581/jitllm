@@ -148,16 +148,27 @@ public class Phi3Q8_0FFNLayers
         var taskGraphName = "layer_" + layerIndex;
         var unifiedLayer = new TaskGraph(taskGraphName);
 
-        unifiedLayer.consumeFromDevice(phi3State.workspace.wrapX);
-        unifiedLayer.transferToDevice(
-                DataTransferMode.FIRST_EXECUTION,
-                // Copy-in quantized weights per layer (Q8_0 format: ByteArray)
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                weights.wqkvLayered[layerIndex].asByteArray(),
-                weights.woLayered[layerIndex].asByteArray(),
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                weights.wUpLayered[layerIndex].asByteArray(),
-                weights.wDownLayered[layerIndex].asByteArray());
+        String wrapXSrc = predecessorGraphName(layerIndex);
+        if (wrapXSrc != null) {
+            unifiedLayer.consumeFromDevice(wrapXSrc, phi3State.workspace.wrapX);
+        } else {
+            unifiedLayer.consumeFromDevice(phi3State.workspace.wrapX);
+        }
+        Object[] layerWeights = {
+            // Copy-in quantized weights per layer (Q8_0 format: ByteArray)
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.wqkvLayered[layerIndex].asByteArray(),
+            weights.woLayered[layerIndex].asByteArray(),
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            weights.wUpLayered[layerIndex].asByteArray(),
+            weights.wDownLayered[layerIndex].asByteArray()
+        };
+        String weightSrc = weightSourceGraphName(layerIndex);
+        if (weightSrc != null) {
+            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
+        } else {
+            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
+        }
         unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -415,5 +426,22 @@ public class Phi3Q8_0FFNLayers
         return useFp16KVCache()
                 ? state.workspace.wrapValueCacheFP16
                 : state.workspace.wrapValueCache;
+    }
+
+    /**
+     * The graph {@code wrapX} is consumed from, or {@code null} for the no-arg form. The batched
+     * prefill/decode plan's decode layers name their predecessor; see {@code
+     * LlamaFP16FFNLayers#predecessorGraphName}.
+     */
+    protected String predecessorGraphName(int layerIndex) {
+        return null;
+    }
+
+    /**
+     * The graph that already uploaded this layer's weights, or {@code null} to upload them here;
+     * see {@code LlamaFP16FFNLayers#weightSourceGraphName}.
+     */
+    protected String weightSourceGraphName(int layerIndex) {
+        return null;
     }
 }

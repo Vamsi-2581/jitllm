@@ -8,10 +8,12 @@ import org.beehive.jitllm.backend.tornado.kernels.Qwen35BatchKernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen35Int8Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen35MMAKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_0;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_1;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ5_K;
 import org.beehive.jitllm.backend.tornado.plan.FusedOperandSupport;
+import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.Qwen35State;
@@ -149,6 +151,9 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
      * per output, negative for a warp per 4 x 4 tile.
      */
     private final java.util.Map<String, Integer> warpMatVecTasks = new java.util.LinkedHashMap<>();
+
+    /** The Q4_0 projections placed on the Metal SIMD-group GEMMs, with their output counts. */
+    private final java.util.Map<String, Integer> simdgroupTasks = new java.util.LinkedHashMap<>();
 
     /**
      * The smallest output width measured to gain from dequantize-then-GEMM. At 1,024 outputs the
@@ -517,6 +522,14 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
     // ── validation and dispatch ───────────────────────────────────────────────
 
     /** Whether this state's key/value store is half precision. */
+    /**
+     * Whether a Q4_0 projection over {@code n} inputs runs on the Metal SIMD-group GEMMs, which
+     * stage the contraction in 64-wide slices; see {@link BatchPrefillGemmPolicy#simdgroup()}.
+     */
+    private static boolean simdgroupQ4_0(int n) {
+        return BatchPrefillGemmPolicy.simdgroup() && n % 64 == 0;
+    }
+
     private boolean fp16Kv() {
         return state.usesFp16KeyValueCache();
     }
@@ -603,6 +616,25 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                 }
             }
             case Q4_0 -> {
+                if (simdgroupQ4_0(n)) {
+                    // Metal: 64-token x 64-output tiles on SIMD-group matrices, the weights
+                    // dequantized to float as they are staged.
+                    simdgroupTasks.put("batchLayer_" + layer + "." + task, d);
+                    graph.task(
+                            task,
+                            residual
+                                    ? TransformerBatchPrefillSimdgroupKernels
+                                            ::batchedGemmQ4_0WithResidual
+                                    : TransformerBatchPrefillSimdgroupKernels::batchedGemmQ4_0,
+                            context,
+                            xBatch,
+                            outBatch,
+                            w.asByteArray(),
+                            n,
+                            d,
+                            batchSize);
+                    return;
+                }
                 // The normed chunk is also staged as FP16 right after the norm, so a projection
                 // reading it can run on the tensor cores rather than as a scalar matrix-vector.
                 // Anything else — a residual form, another input, a shape the MMA tiles do not
@@ -862,6 +894,39 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                         state.workspace.wrapUpBatch,
                         state.workspace.wrapHbBatch);
             }
+            return;
+        }
+        if (simdgroupQ4_0(config.dim())) {
+            // Metal: gate and up as two SIMD-group GEMMs, then SwiGLU, as on the tensor cores.
+            matVecBatch(
+                    graph,
+                    layer,
+                    "ffn_gate_proj",
+                    "ffn_gate",
+                    gate,
+                    xBatch,
+                    state.workspace.wrapGateBatch,
+                    config.dim(),
+                    config.hiddenDim(),
+                    false);
+            matVecBatch(
+                    graph,
+                    layer,
+                    "ffn_up_proj",
+                    "ffn_up",
+                    up,
+                    xBatch,
+                    state.workspace.wrapUpBatch,
+                    config.dim(),
+                    config.hiddenDim(),
+                    false);
+            graph.task(
+                    "ffn_swiglu",
+                    Qwen35MMAKernels::swiGLUBatch,
+                    context,
+                    state.workspace.wrapGateBatch,
+                    state.workspace.wrapUpBatch,
+                    state.workspace.wrapHbBatch);
             return;
         }
         rowTiles.put(
@@ -2071,7 +2136,8 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                 scheduler.addWorkerGrid(prefix + "attn_rms_apply_fp16", fp16Convert);
                 scheduler.addWorkerGrid(prefix + "ffn_rms_apply_fp16", fp16Convert);
             }
-            if (onTensorCores(prefix + "ffn_gate_proj")) {
+            if (onTensorCores(prefix + "ffn_gate_proj")
+                    || simdgroupTasks.containsKey(prefix + "ffn_gate_proj")) {
                 scheduler.addWorkerGrid(
                         prefix + "ffn_gate_proj",
                         matVecWorker(prefix + "ffn_gate_proj", config.hiddenDim()));
@@ -2218,6 +2284,12 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
 
     /** One workgroup per (row, output row), or per (row tile, output row) where tiled. */
     private WorkerGrid matVecWorker(String qualifiedTask, int rows) {
+        Integer simdgroupOutputs = simdgroupTasks.get(qualifiedTask);
+        if (simdgroupOutputs != null) {
+            int local = TransformerBatchPrefillSimdgroupKernels.THREADS;
+            return WorkerGridFactory.genericWorker(
+                    ((simdgroupOutputs + 63) / 64) * ((batchSize + 63) / 64) * local, local);
+        }
         Integer warpOutputs = warpMatVecTasks.get(qualifiedTask);
         if (warpOutputs != null) {
             if (warpOutputs < 0) {
