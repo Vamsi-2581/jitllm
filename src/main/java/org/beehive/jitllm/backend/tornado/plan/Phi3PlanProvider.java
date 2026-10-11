@@ -43,21 +43,22 @@ public final class Phi3PlanProvider implements TornadoPlanProvider {
                 : new Phi3Q8_0PlanComponents(typed, model);
     }
 
-    /** Single-token plans only, on the NVIDIA-class decode layers. */
+    /** Single-token and batched-prefill plans, on the NVIDIA-class decode layers. */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
-        return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
+        return Fp16KeyValueSupport.singleTokenAndBatchedNvidiaLayers(c);
     }
 
     /**
-     * The batched prefill runs the Metal SIMD-group kernels only, for its fused QKV and gate/up
-     * weights.
+     * The batched prefill runs the Metal SIMD-group kernels or the CUDA tensor cores, which read
+     * the fused QKV and gate/up weights in one GEMM each; there is no scalar path.
      */
     @Override
     public Optional<String> batchPrefillUnsupported(Combination c) {
-        return BackendId.METAL.equals(c.backend())
+        return BackendId.METAL.equals(c.backend()) || c.tensorCores()
                 ? Optional.empty()
                 : Optional.of(
-                        "the phi3 batched prefill runs the Metal SIMD-group kernels only, for its fused QKV and gate/up weights");
+                        "the phi3 batched prefill runs on the Metal SIMD-group kernels or the CUDA"
+                                + " tensor cores, for its fused QKV and gate/up weights");
     }
 }

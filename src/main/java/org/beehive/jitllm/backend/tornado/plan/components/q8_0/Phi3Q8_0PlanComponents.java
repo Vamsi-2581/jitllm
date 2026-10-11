@@ -1,5 +1,6 @@
 package org.beehive.jitllm.backend.tornado.plan.components.q8_0;
 
+import org.beehive.jitllm.backend.tornado.TensorCoreSupport;
 import org.beehive.jitllm.backend.tornado.layers.AbstractLogitsTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.Activation;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
@@ -9,6 +10,7 @@ import org.beehive.jitllm.backend.tornado.layers.PackedQ8_0LogitsLayerDecode;
 import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.phi3.Phi3Q8_0FFNLayersDecode;
 import org.beehive.jitllm.backend.tornado.layers.phi3.Phi3Q8_0LayersBatchPrefill;
+import org.beehive.jitllm.backend.tornado.layers.phi3.Phi3Q8_0LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.Phi3Q8_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.plan.components.BatchPrefillDecodeForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchDecodeActivation;
@@ -77,6 +79,9 @@ public class Phi3Q8_0PlanComponents implements BatchPrefillDecodeForwardPlanComp
 
     @Override
     public BatchPrefillTransformerLayerTaskGraphs batchPrefillTransformerLayers(int batchSize) {
+        if (TensorCoreSupport.isTensorCoreCapableBackend()) {
+            return new Phi3Q8_0LayersBatchPrefillMMA(state, weights, config, batchSize);
+        }
         return new Phi3Q8_0LayersBatchPrefill(state, weights, config, batchSize);
     }
 
