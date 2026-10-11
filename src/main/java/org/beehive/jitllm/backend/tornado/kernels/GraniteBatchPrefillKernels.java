@@ -26,7 +26,12 @@ public final class GraniteBatchPrefillKernels {
      * r}. One thread per (token, Q row); threads past {@code batch} tokens do nothing.
      */
     public static void batchedPackedScaleQ(
-            KernelContext context, FloatArray qkvBatch, float scale, int dim, int kvDim, int batch) {
+            KernelContext context,
+            FloatArray qkvBatch,
+            float scale,
+            int dim,
+            int kvDim,
+            int batch) {
         int index = context.globalIdx;
         if (index < batch * dim) {
             int token = index / dim;

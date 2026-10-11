@@ -271,8 +271,8 @@ public class Fp16KeyValueSupportTest {
     }
 
     /**
-     * The tensor-core batched prefill of Qwen2, Phi-3 and Granite writes the FP16 cache; their sequential
-     * plans do not.
+     * The tensor-core batched prefill of Qwen2, Phi-3 and Granite writes the FP16 cache; their
+     * sequential plans do not.
      */
     @Test
     public void tensorCoreBatchedPrefillTakesTheFp16Cache() {

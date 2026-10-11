@@ -9,9 +9,10 @@ import org.beehive.jitllm.model.phi3.Phi3Configuration;
 import uk.ac.manchester.tornado.api.TaskGraph;
 
 /**
- * Phi-3's tensor-core batched prefill: {@link LlamaFP16LayersBatchPrefillMMA}, reading the fused {@code wqkv} and {@code
- * wUp} weights in one GEMM each, and Phi-3's split-half RoPE. A fused weight's rows are the packed
- * rows the layers read: {@code [q|k|v]}, and {@code [gate|up]} with the gate rows first.
+ * Phi-3's tensor-core batched prefill: {@link LlamaFP16LayersBatchPrefillMMA}, reading the fused
+ * {@code wqkv} and {@code wUp} weights in one GEMM each, and Phi-3's split-half RoPE. A fused
+ * weight's rows are the packed rows the layers read: {@code [q|k|v]}, and {@code [gate|up]} with
+ * the gate rows first.
  */
 public class Phi3FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillMMA {
 

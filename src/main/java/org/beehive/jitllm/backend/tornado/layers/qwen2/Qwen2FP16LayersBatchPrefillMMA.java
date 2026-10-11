@@ -10,8 +10,8 @@ import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 
 /**
- * Qwen2's tensor-core batched prefill: {@link LlamaFP16LayersBatchPrefillMMA}, with the Q, K and V biases added to the
- * packed rows of the fused QKV GEMM and Qwen2's split-half RoPE.
+ * Qwen2's tensor-core batched prefill: {@link LlamaFP16LayersBatchPrefillMMA}, with the Q, K and V
+ * biases added to the packed rows of the fused QKV GEMM and Qwen2's split-half RoPE.
  */
 public class Qwen2FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillMMA {
 

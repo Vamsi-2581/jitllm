@@ -79,10 +79,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     }
 
     public LlamaFP16LayersBatchPrefillMMA(
-            State state,
-            TornadoWeights weights,
-            Configuration config,
-            int batchSize) {
+            State state, TornadoWeights weights, Configuration config, int batchSize) {
         this.state = state;
         // Resolved once from the session's policy, not read from a class constant.
         this.packedHalf2Attention = state.executionPolicy().packedHalf2Attention();
@@ -179,7 +176,8 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         }
 
         // Per-layer weights: upload once
-        batchPrefillLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights(layerIndex));
+        batchPrefillLayer.transferToDevice(
+                DataTransferMode.FIRST_EXECUTION, layerWeights(layerIndex));
         Object[] extraWeights = extraLayerWeights(layerIndex);
         if (extraWeights.length > 0) {
             batchPrefillLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, extraWeights);
@@ -241,7 +239,8 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             } else {
                 batchPrefillLayer.task(
                         "batch_rope_kv",
-                        TransformerPagedKvBatchPrefillKernels::batchedRopeWithKVCachePackedFP16Paged,
+                        TransformerPagedKvBatchPrefillKernels
+                                ::batchedRopeWithKVCachePackedFP16Paged,
                         context,
                         state.workspace.batchStartPosHolder,
                         state.workspace.qkvResultBatch,
@@ -398,11 +397,11 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         hidDim);
         afterDownProjection(batchPrefillLayer, layerIndex);
         batchPrefillLayer.task(
-                        "w2Resid",
-                        TransformerBatchPrefillKernels::batchedResidualAddFP32,
-                        context,
-                        state.workspace.wrapXBatch,
-                        state.workspace.w2Out);
+                "w2Resid",
+                TransformerBatchPrefillKernels::batchedResidualAddFP32,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.w2Out);
 
         // Persist wrapXBatch for the next layer, and KV cache so the decode
         // layers can consume it via the activation graph pass-through.
@@ -416,17 +415,17 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     /** The per-layer weights this layer's tasks read, uploaded once. */
     protected Object[] layerWeights(int layerIndex) {
         return new Object[] {
-        weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-        weights.wqLayered[layerIndex].asHalfFloatArray(),
-        weights.wkLayered[layerIndex].asHalfFloatArray(),
-        weights.wvLayered[layerIndex].asHalfFloatArray(),
-        weights.woLayered[layerIndex].asHalfFloatArray(),
-        weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-        weights.w1Layered[layerIndex].asHalfFloatArray(),
-        weights.w2Layered[layerIndex].asHalfFloatArray(),
-        weights.w3Layered[layerIndex].asHalfFloatArray(),
-        weights.freq_cis_realFlat.asFloatArray(),
-        weights.freq_cis_imagFlat.asFloatArray()
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.wqLayered[layerIndex].asHalfFloatArray(),
+            weights.wkLayered[layerIndex].asHalfFloatArray(),
+            weights.wvLayered[layerIndex].asHalfFloatArray(),
+            weights.woLayered[layerIndex].asHalfFloatArray(),
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            weights.w1Layered[layerIndex].asHalfFloatArray(),
+            weights.w2Layered[layerIndex].asHalfFloatArray(),
+            weights.w3Layered[layerIndex].asHalfFloatArray(),
+            weights.freq_cis_realFlat.asFloatArray(),
+            weights.freq_cis_imagFlat.asFloatArray()
         };
     }
 
@@ -450,7 +449,9 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 dim);
     }
 
-    /** The gate and up projections: packed {@code [gate|up]} rows into {@code gateUpResultBatch}. */
+    /**
+     * The gate and up projections: packed {@code [gate|up]} rows into {@code gateUpResultBatch}.
+     */
     protected void gateUpProjection(TaskGraph batchPrefillLayer, int layerIndex) {
         int dim = config.dim();
         int hidDim = config.hiddenDim();
@@ -489,12 +490,14 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     /** Tasks a family runs on {@code w2Out} before it is added to the stream. */
     protected void afterDownProjection(TaskGraph batchPrefillLayer, int layerIndex) {}
 
-    /** The grids of the family's own tasks in layer {@code layerIndex}, under its prefix {@code p}. */
+    /**
+     * The grids of the family's own tasks in layer {@code layerIndex}, under its prefix {@code p}.
+     */
     protected void addFamilyTaskGrids(GridScheduler scheduler, String p, int layerIndex) {}
 
     /**
-     * Whether RoPE pairs element {@code i} with {@code i + headSize/2} (NeoX), computed from
-     * {@link #ropeTheta()}, instead of Llama's adjacent pairs over the precomputed tables.
+     * Whether RoPE pairs element {@code i} with {@code i + headSize/2} (NeoX), computed from {@link
+     * #ropeTheta()}, instead of Llama's adjacent pairs over the precomputed tables.
      */
     protected boolean splitHalfRope() {
         return false;

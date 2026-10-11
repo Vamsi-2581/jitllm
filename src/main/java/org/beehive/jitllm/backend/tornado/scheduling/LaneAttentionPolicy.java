@@ -134,9 +134,9 @@ public final class LaneAttentionPolicy {
     private LaneAttentionPolicy() {}
 
     /**
-     * Whether a lane-cooperative kernel may be used for this head width on the active device:
-     * CUDA for every width with a kernel, and Metal for the 128-wide one, where it is the FP16
-     * cache's split-KV decode attention.
+     * Whether a lane-cooperative kernel may be used for this head width on the active device: CUDA
+     * for every width with a kernel, and Metal for the 128-wide one, where it is the FP16 cache's
+     * split-KV decode attention.
      *
      * @param headSize the model's head width; anything but 64, 96 or 128 is refused
      */

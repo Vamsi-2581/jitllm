@@ -10,11 +10,12 @@ import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 
 /**
- * Granite's tensor-core batched prefill: {@link LlamaFP16LayersBatchPrefillMMA} with Granite's multipliers. The first
- * layer scales the batch by the embedding multiplier; Q is scaled by {@code attentionScale *
- * sqrt(headSize)} after the QKV GEMM, which the attention kernel's {@code 1 / sqrt(headSize)} turns
- * into the attention multiplier; and both projections added to the stream are scaled by the
- * residual multiplier. RoPE reads the precomputed tables, built from Granite's own base.
+ * Granite's tensor-core batched prefill: {@link LlamaFP16LayersBatchPrefillMMA} with Granite's
+ * multipliers. The first layer scales the batch by the embedding multiplier; Q is scaled by {@code
+ * attentionScale * sqrt(headSize)} after the QKV GEMM, which the attention kernel's {@code 1 /
+ * sqrt(headSize)} turns into the attention multiplier; and both projections added to the stream are
+ * scaled by the residual multiplier. RoPE reads the precomputed tables, built from Granite's own
+ * base.
  */
 public class GraniteFP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillMMA {
 
