@@ -574,9 +574,16 @@ public class LlamaFP16FFNLayers
 
     static final int LAYERS_PER_GRAPH = 8;
 
+    /**
+     * Split-KV on the NVIDIA path, and on Metal where a split kernel fits: the 32-thread FP32-cache
+     * kernels, or the lane-cooperative FP16-cache kernel for its head width. The per-key FP16 split
+     * kernel needs more threadgroup memory than Metal allows.
+     */
     protected boolean splitKvAttentionEnabled() {
         return splitKvAttention
-                && (schedulerType == SchedulerType.NVIDIA || SplitKvAttentionPolicy.narrow());
+                && (schedulerType == SchedulerType.NVIDIA
+                        || (SplitKvAttentionPolicy.narrow()
+                                && (!useFp16KVCache() || laneAttention(config.headSize()))));
     }
 
     /** The key cache every graph of this family binds: FP16 when the state holds one. */
