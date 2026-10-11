@@ -54,7 +54,7 @@ public class Qwen2Q8_0LayersBatchPrefillMMA extends LlamaQ8_0LayersBatchPrefillM
     }
 
     @Override
-    protected void addAfterQkvProjectionGrids(GridScheduler scheduler, String p) {
+    protected void addFamilyTaskGrids(GridScheduler scheduler, String p, int layerIndex) {
         int rows = batchSize * (config.dim() + 2 * config.kvDim());
         scheduler.addWorkerGrid(
                 p + "batch_qkv_bias",

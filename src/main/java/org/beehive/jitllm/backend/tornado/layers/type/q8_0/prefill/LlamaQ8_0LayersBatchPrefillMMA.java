@@ -190,6 +190,8 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         int kvDim = config.kvDim();
         int hidDim = config.hiddenDim();
 
+        atLayerStart(batchPrefillLayer, layerIndex);
+
         // ── Attention Block ────────────────────────────────────────────────────
         batchPrefillLayer.task(
                 "batch_attn_rms",
@@ -348,6 +350,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 paddedBatch,
                 dim,
                 dim);
+        afterAttentionOutputProjection(batchPrefillLayer, layerIndex);
 
         // ── FFN Block ──────────────────────────────────────────────────────────
         // x += woOut is fused into the FFN RMS reduction (drops the woResid task).
@@ -392,8 +395,9 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         state.workspace.w2Out,
                         batchSize,
                         dim,
-                        hidDim)
-                .task(
+                        hidDim);
+        afterDownProjection(batchPrefillLayer, layerIndex);
+        batchPrefillLayer.task(
                         "w2Resid",
                         TransformerBatchPrefillKernels::batchedResidualAddFP32,
                         context,
@@ -475,8 +479,17 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     /** Tasks a family runs between the fused QKV GEMM and RoPE, over the packed rows. */
     protected void afterQkvProjection(TaskGraph batchPrefillLayer, int layerIndex) {}
 
-    /** The grids of {@link #afterQkvProjection}'s tasks, under the layer prefix {@code p}. */
-    protected void addAfterQkvProjectionGrids(GridScheduler scheduler, String p) {}
+    /** Tasks a family runs at the start of a layer, before the attention RMS norm. */
+    protected void atLayerStart(TaskGraph batchPrefillLayer, int layerIndex) {}
+
+    /** Tasks a family runs on {@code woOut} before it is added to the stream. */
+    protected void afterAttentionOutputProjection(TaskGraph batchPrefillLayer, int layerIndex) {}
+
+    /** Tasks a family runs on {@code w2Out} before it is added to the stream. */
+    protected void afterDownProjection(TaskGraph batchPrefillLayer, int layerIndex) {}
+
+    /** The grids of the family's own tasks in layer {@code layerIndex}, under its prefix {@code p}. */
+    protected void addFamilyTaskGrids(GridScheduler scheduler, String p, int layerIndex) {}
 
     /**
      * Whether RoPE pairs element {@code i} with {@code i + headSize/2} (NeoX), computed from
@@ -549,7 +562,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             scheduler.addWorkerGrid(p + "batch_attn_rms_apply", rmsApplyWorker);
             scheduler.addWorkerGrid(p + "qkvProj", mmaQkvWorker);
             scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
-            addAfterQkvProjectionGrids(scheduler, p);
+            addFamilyTaskGrids(scheduler, p, i);
             scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
             scheduler.addWorkerGrid(p + "woProj", mmaDimWorker);
             scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);

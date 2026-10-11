@@ -21,6 +21,22 @@ public final class GraniteBatchPrefillKernels {
     }
 
     /**
+     * Scales the Q rows of the packed {@code [q|k|v]} rows the tensor-core QKV GEMM writes, by
+     * {@code scale}: row {@code r < dim} of token {@code t} sits at {@code t * (dim + 2 * kvDim) +
+     * r}. One thread per (token, Q row); threads past {@code batch} tokens do nothing.
+     */
+    public static void batchedPackedScaleQ(
+            KernelContext context, FloatArray qkvBatch, float scale, int dim, int kvDim, int batch) {
+        int index = context.globalIdx;
+        if (index < batch * dim) {
+            int token = index / dim;
+            int row = index % dim;
+            int o = token * (dim + 2 * kvDim) + row;
+            qkvBatch.set(o, qkvBatch.get(o) * scale);
+        }
+    }
+
+    /**
      * {@code GranitePagedKvKernels.ropeRotationWithCacheCopyPaged} for a batch: interleaved pairs
      * {@code (i, i + 1)}, the frequency computed from {@code ropeTheta} in the kernel, the rotated
      * K and the V of every active token written to the paged cache. One thread per (token, pair);

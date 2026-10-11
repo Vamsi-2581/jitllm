@@ -1,5 +1,6 @@
 package org.beehive.jitllm.backend.tornado.plan.components.q8_0;
 
+import org.beehive.jitllm.backend.tornado.TensorCoreSupport;
 import org.beehive.jitllm.backend.tornado.layers.AbstractLogitsTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.ActivationGranite;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
@@ -8,6 +9,7 @@ import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.granite.GraniteBatchDecodeActivation;
 import org.beehive.jitllm.backend.tornado.layers.granite.GraniteQ8_0FFNLayersDecode;
 import org.beehive.jitllm.backend.tornado.layers.granite.GraniteQ8_0LayersBatchPrefill;
+import org.beehive.jitllm.backend.tornado.layers.granite.GraniteQ8_0LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.layers.granite.LogitsGraniteQ8_0LayerDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.GraniteQ8_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.LogitsGraniteQ8_0Layer;
@@ -79,6 +81,9 @@ public class GraniteQ8_0PlanComponents implements BatchPrefillDecodeForwardPlanC
 
     @Override
     public BatchPrefillTransformerLayerTaskGraphs batchPrefillTransformerLayers(int batchSize) {
+        if (TensorCoreSupport.isTensorCoreCapableBackend()) {
+            return new GraniteQ8_0LayersBatchPrefillMMA(state, weights, config, batchSize);
+        }
         return new GraniteQ8_0LayersBatchPrefill(state, weights, config, batchSize);
     }
 

@@ -1,5 +1,6 @@
 package org.beehive.jitllm.backend.tornado.plan.components.fp16;
 
+import org.beehive.jitllm.backend.tornado.TensorCoreSupport;
 import org.beehive.jitllm.backend.tornado.layers.AbstractLogitsTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.ActivationGranite;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
@@ -8,6 +9,7 @@ import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.granite.GraniteBatchDecodeActivation;
 import org.beehive.jitllm.backend.tornado.layers.granite.GraniteFP16FFNLayersDecode;
 import org.beehive.jitllm.backend.tornado.layers.granite.GraniteFP16LayersBatchPrefill;
+import org.beehive.jitllm.backend.tornado.layers.granite.GraniteFP16LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.layers.granite.LogitsGraniteFP16LayerDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.GraniteFP16FFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.LogitsGraniteFP16Layer;
@@ -79,6 +81,9 @@ public class GraniteFP16PlanComponents implements BatchPrefillDecodeForwardPlanC
 
     @Override
     public BatchPrefillTransformerLayerTaskGraphs batchPrefillTransformerLayers(int batchSize) {
+        if (TensorCoreSupport.isTensorCoreCapableBackend()) {
+            return new GraniteFP16LayersBatchPrefillMMA(state, weights, config, batchSize);
+        }
         return new GraniteFP16LayersBatchPrefill(state, weights, config, batchSize);
     }
 

@@ -43,21 +43,22 @@ public final class GranitePlanProvider implements TornadoPlanProvider {
                 : new GraniteQ8_0PlanComponents(typed, model);
     }
 
-    /** Single-token plans only, on the NVIDIA-class decode layers. */
+    /** Single-token and batched-prefill plans, on the NVIDIA-class decode layers. */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
-        return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
+        return Fp16KeyValueSupport.singleTokenAndBatchedNvidiaLayers(c);
     }
 
     /**
-     * The batched prefill runs the Metal SIMD-group kernels only, for its scaled residual and
-     * attention.
+     * The batched prefill runs the Metal SIMD-group kernels or the CUDA tensor cores, for its
+     * scaled residual and attention; there is no scalar path.
      */
     @Override
     public Optional<String> batchPrefillUnsupported(Combination c) {
-        return BackendId.METAL.equals(c.backend())
+        return BackendId.METAL.equals(c.backend()) || c.tensorCores()
                 ? Optional.empty()
                 : Optional.of(
-                        "the granite batched prefill runs the Metal SIMD-group kernels only, for its scaled residual and attention");
+                        "the granite batched prefill runs on the Metal SIMD-group kernels or the"
+                                + " CUDA tensor cores, for its scaled residual and attention");
     }
 }
