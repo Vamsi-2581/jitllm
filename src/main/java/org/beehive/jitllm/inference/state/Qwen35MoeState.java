@@ -47,7 +47,7 @@ public final class Qwen35MoeState extends Qwen35State {
         if (workspace.wrapX != null) {
             allocateDeviceExperts(experts);
             if (prefillBatchWidth > 1) {
-                allocateBatchExperts(config, experts, prefillBatchWidth);
+                allocateBatchExperts(workspace, config, experts, prefillBatchWidth);
             }
         }
     }
@@ -69,9 +69,14 @@ public final class Qwen35MoeState extends Qwen35State {
 
     /**
      * A chunk's routing, its assignments sorted by expert, and the experts' activations in that
-     * sorted order; the shared expert's over the whole chunk.
+     * sorted order; the shared expert's over the whole chunk. Shared with the other families whose
+     * batched feed-forward runs {@code Qwen35MoeBatchFeedForward}'s expert tasks.
      */
-    private void allocateBatchExperts(Configuration config, Qwen35Experts experts, int batch) {
+    static void allocateBatchExperts(
+            org.beehive.jitllm.backend.tornado.workspace.TornadoWorkspace workspace,
+            Configuration config,
+            Qwen35Experts experts,
+            int batch) {
         int assignments = batch * experts.used();
         int hidden = experts.hiddenDim();
         int shared = Math.max(experts.sharedHiddenDim(), 32);

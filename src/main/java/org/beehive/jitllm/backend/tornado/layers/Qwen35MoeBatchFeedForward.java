@@ -50,11 +50,10 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
             int dim,
             int batchSize) {
         if (experts.count() > Qwen35MoeBatchKernels.GROUP_THREADS
-                || experts.count() % Qwen35MoeBatchKernels.ROUTER_TILE != 0
                 || batchSize % Qwen35MoeBatchKernels.ROUTER_TILE != 0) {
             throw new UnsupportedOperationException(
-                    "the batched expert path needs at most 1024 experts, and experts and a chunk"
-                            + " width that are multiples of 64");
+                    "the batched expert path needs at most 1024 experts and a chunk width that is a"
+                            + " multiple of 64");
         }
         this.workspace = workspace;
         this.experts = experts;
@@ -66,9 +65,19 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
     /** Adds layer {@code layerIndex}'s feed-forward tasks. */
     @Override
     public void appendTasks(TaskGraph layer, KernelContext context, int layerIndex) {
+        appendRouter(layer, context, layerIndex);
+        appendSharedGateInput(layer, context, layerIndex);
+        appendTopK(layer, context);
+        appendExperts(layer, context, layerIndex);
+    }
+
+    /** The router's logits for every token, tiled: the expert count a multiple of 64. */
+    public void appendRouter(TaskGraph layer, KernelContext context, int layerIndex) {
+        if (experts.count() % Qwen35MoeBatchKernels.ROUTER_TILE != 0) {
+            throw new UnsupportedOperationException(
+                    "the tiled router needs an expert count that is a multiple of 64");
+        }
         var ws = workspace;
-        int hidden = experts.hiddenDim();
-        int shared = experts.sharedHiddenDim();
         layer.task(
                 "moe_router",
                 Qwen35MoeBatchKernels::routerTiled,
@@ -79,6 +88,11 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
                 ws.batchStartPosHolder,
                 dim,
                 experts.count());
+    }
+
+    /** Every token's shared-expert gate. */
+    public void appendSharedGateInput(TaskGraph layer, KernelContext context, int layerIndex) {
+        var ws = workspace;
         layer.task(
                 "moe_shared_gate_input",
                 Qwen35MoeBatchKernels::sharedGateBatch,
@@ -88,6 +102,11 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
                 ws.wrapMoeSharedGateBatch,
                 ws.batchStartPosHolder,
                 dim);
+    }
+
+    /** Every token's experts and their weights, renormalized over the chosen ones. */
+    public void appendTopK(TaskGraph layer, KernelContext context) {
+        var ws = workspace;
         layer.task(
                 "moe_topk",
                 Qwen35MoeBatchKernels::routerTopKBatch,
@@ -98,6 +117,16 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
                 ws.batchStartPosHolder,
                 experts.count(),
                 experts.used());
+    }
+
+    /**
+     * From the routed ids and weights on: the assignments grouped by expert, the grouped expert
+     * GEMMs, the shared expert, and the weighted combine into the residual stream.
+     */
+    public void appendExperts(TaskGraph layer, KernelContext context, int layerIndex) {
+        var ws = workspace;
+        int hidden = experts.hiddenDim();
+        int shared = experts.sharedHiddenDim();
         layer.task(
                 "moe_group",
                 Qwen35MoeBatchKernels::groupByExpert,
@@ -261,9 +290,13 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
     /** Grids of one layer's feed-forward tasks, whose qualified names start with {@code prefix}. */
     @Override
     public void addWorkerGrids(GridScheduler scheduler, String prefix) {
-        int assignments = batchSize * experts.used();
-        int shared = experts.sharedHiddenDim();
-        int maxTiles = Qwen35MoeBatchKernels.maxTiles(assignments, experts.count());
+        addRouterAndTopKGrids(scheduler, prefix);
+        addSharedGateInputGrid(scheduler, prefix);
+        addExpertGrids(scheduler, prefix);
+    }
+
+    /** Grids of {@link #appendRouter} and {@link #appendTopK}. */
+    public void addRouterAndTopKGrids(GridScheduler scheduler, String prefix) {
         WorkerGrid router =
                 new WorkerGrid2D(
                         batchSize / Qwen35MoeBatchKernels.ROUTER_TILE * 256,
@@ -271,10 +304,21 @@ public final class Qwen35MoeBatchFeedForward implements Qwen35BatchFeedForward {
         router.setLocalWork(256, 1, 1);
         scheduler.addWorkerGrid(prefix + "moe_router", router);
         scheduler.addWorkerGrid(
+                prefix + "moe_topk", WorkerGridFactory.genericWorker(batchSize * 32, 32));
+    }
+
+    /** Grid of {@link #appendSharedGateInput}. */
+    public void addSharedGateInputGrid(GridScheduler scheduler, String prefix) {
+        scheduler.addWorkerGrid(
                 prefix + "moe_shared_gate_input",
                 WorkerGridFactory.genericWorker(batchSize * 32, 128));
-        scheduler.addWorkerGrid(
-                prefix + "moe_topk", WorkerGridFactory.genericWorker(batchSize * 32, 32));
+    }
+
+    /** Grids of {@link #appendExperts}. */
+    public void addExpertGrids(GridScheduler scheduler, String prefix) {
+        int assignments = batchSize * experts.used();
+        int shared = experts.sharedHiddenDim();
+        int maxTiles = Qwen35MoeBatchKernels.maxTiles(assignments, experts.count());
         scheduler.addWorkerGrid(
                 prefix + "moe_group",
                 WorkerGridFactory.genericWorker(

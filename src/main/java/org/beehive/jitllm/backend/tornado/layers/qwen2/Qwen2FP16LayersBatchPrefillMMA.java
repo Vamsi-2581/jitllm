@@ -5,7 +5,7 @@ import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16Laye
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen2State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen2TornadoWeights;
-import org.beehive.jitllm.model.qwen2.Qwen2Configuration;
+import org.beehive.jitllm.model.Configuration;
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 
@@ -18,7 +18,7 @@ public class Qwen2FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillM
     public Qwen2FP16LayersBatchPrefillMMA(
             Qwen2State state,
             Qwen2TornadoWeights weights,
-            Qwen2Configuration config,
+            Configuration config,
             int batchSize) {
         super(state, weights, config, batchSize);
     }
@@ -68,6 +68,6 @@ public class Qwen2FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillM
 
     @Override
     protected float ropeTheta() {
-        return ((Qwen2Configuration) config).ropeTheta();
+        return config.ropeTheta();
     }
 }

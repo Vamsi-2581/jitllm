@@ -185,7 +185,6 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
 
         int dim = config.dim();
         int kvDim = config.kvDim();
-        int hidDim = config.hiddenDim();
         int qDim = config.numberOfHeads() * config.headSize();
 
         atLayerStart(batchPrefillLayer, layerIndex);
@@ -351,57 +350,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 qDim);
         afterAttentionOutputProjection(batchPrefillLayer, layerIndex);
 
-        // ── FFN Block ──────────────────────────────────────────────────────────
-        // x += woOut is fused into the FFN RMS reduction (drops the woResid task).
-        batchPrefillLayer.task(
-                "batch_ffn_rms",
-                TransformerBatchPrefillKernels::batchedRmsReduceFusedResidual,
-                context,
-                state.workspace.wrapXBatch,
-                state.workspace.woOut,
-                state.workspace.ffnScaleBatch,
-                dim,
-                config.rmsNormEps(),
-                RMS_LOCAL_SIZE);
-
-        batchPrefillLayer.task(
-                "batch_ffn_rms_apply",
-                TransformerBatchPrefillKernels::batchedFFNRmsApplyFP16,
-                context,
-                state.workspace.normedXFFNFP16,
-                state.workspace.wrapXBatch,
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                state.workspace.ffnScaleBatch,
-                dim);
-
-        // W1 and W3 in ONE tensor-core launch → packed [gate|up] rows.
-        gateUpProjection(batchPrefillLayer, layerIndex);
-
-        batchPrefillLayer
-                .task(
-                        "swiglu",
-                        TransformerBatchPrefillKernels::batchedFFNSwiGLUFP16Packed,
-                        context,
-                        state.workspace.wrapHbFP16Batch,
-                        state.workspace.gateUpResultBatch,
-                        hidDim)
-                .task(
-                        "w2Proj",
-                        TransformerBatchPrefillKernels::gemmMMA,
-                        context,
-                        state.workspace.wrapHbFP16Batch,
-                        downWeight(layerIndex).asHalfFloatArray(),
-                        state.workspace.w2Out,
-                        batchSize,
-                        dim,
-                        hidDim);
-        afterDownProjection(batchPrefillLayer, layerIndex);
-        batchPrefillLayer.task(
-                "w2Resid",
-                TransformerBatchPrefillKernels::batchedResidualAddFP32,
-                context,
-                state.workspace.wrapXBatch,
-                state.workspace.w2Out);
+        feedForward(batchPrefillLayer, layerIndex);
 
         // Persist wrapXBatch for the next layer, and KV cache so the decode
         // layers can consume it via the activation graph pass-through.
@@ -473,6 +422,81 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         return weights.w2Layered[layerIndex];
     }
 
+    /**
+     * The feed-forward block: the attention output added to the stream, RMS norm, gate and up,
+     * SwiGLU, down, and the residual add. A family with another feed-forward replaces it whole.
+     */
+    protected void feedForward(TaskGraph batchPrefillLayer, int layerIndex) {
+        int dim = config.dim();
+        int hidDim = config.hiddenDim();
+        // ── FFN Block ──────────────────────────────────────────────────────────
+        // x += woOut is fused into the FFN RMS reduction (drops the woResid task).
+        batchPrefillLayer.task(
+                "batch_ffn_rms",
+                TransformerBatchPrefillKernels::batchedRmsReduceFusedResidual,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.woOut,
+                state.workspace.ffnScaleBatch,
+                dim,
+                config.rmsNormEps(),
+                RMS_LOCAL_SIZE);
+
+        batchPrefillLayer.task(
+                "batch_ffn_rms_apply",
+                TransformerBatchPrefillKernels::batchedFFNRmsApplyFP16,
+                context,
+                state.workspace.normedXFFNFP16,
+                state.workspace.wrapXBatch,
+                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                state.workspace.ffnScaleBatch,
+                dim);
+
+        // W1 and W3 in ONE tensor-core launch → packed [gate|up] rows.
+        gateUpProjection(batchPrefillLayer, layerIndex);
+
+        batchPrefillLayer
+                .task(
+                        "swiglu",
+                        TransformerBatchPrefillKernels::batchedFFNSwiGLUFP16Packed,
+                        context,
+                        state.workspace.wrapHbFP16Batch,
+                        state.workspace.gateUpResultBatch,
+                        hidDim)
+                .task(
+                        "w2Proj",
+                        TransformerBatchPrefillKernels::gemmMMA,
+                        context,
+                        state.workspace.wrapHbFP16Batch,
+                        downWeight(layerIndex).asHalfFloatArray(),
+                        state.workspace.w2Out,
+                        batchSize,
+                        dim,
+                        hidDim);
+        afterDownProjection(batchPrefillLayer, layerIndex);
+        batchPrefillLayer.task(
+                "w2Resid",
+                TransformerBatchPrefillKernels::batchedResidualAddFP32,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.w2Out);
+    }
+
+    /** The grids of {@link #feedForward}'s tasks in layer {@code layerIndex}, under its prefix. */
+    protected void addFeedForwardGrids(GridScheduler scheduler, String p, int layerIndex) {
+        int dim = config.dim();
+        int hidDim = config.hiddenDim();
+        scheduler.addWorkerGrid(
+                p + "batch_ffn_rms",
+                WorkerGridFactory.genericWorker(batchSize * RMS_LOCAL_SIZE, RMS_LOCAL_SIZE));
+        scheduler.addWorkerGrid(
+                p + "batch_ffn_rms_apply", WorkerGridFactory.genericWorker(batchSize * dim, 256));
+        scheduler.addWorkerGrid(p + "gateUpProj", mmaGrid(paddedBatch, 2 * hidDim));
+        scheduler.addWorkerGrid(p + "swiglu", elementwiseGrid(batchSize * hidDim));
+        scheduler.addWorkerGrid(p + "w2Proj", mmaGrid(paddedBatch, dim));
+        scheduler.addWorkerGrid(p + "w2Resid", elementwiseGrid(batchSize * dim));
+    }
+
     /** Per-layer weights a family adds to the shared projection set, uploaded with it. */
     protected Object[] extraLayerWeights(int layerIndex) {
         return new Object[0];
@@ -527,7 +551,6 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     public void updateGridScheduler(GridScheduler scheduler) {
         int dim = config.dim();
         int kvDim = config.kvDim();
-        int hidDim = config.hiddenDim();
         int qDim = config.numberOfHeads() * config.headSize();
         int nHeads = config.numberOfHeads();
         int headSz = config.headSize();
@@ -538,7 +561,6 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
 
         // RMS apply: B*dim threads, local=256 (dim is always a multiple of 256 for LLaMA)
         WorkerGrid rmsApplyWorker = WorkerGridFactory.genericWorker(batchSize * dim, 256);
-        WorkerGrid ffnRmsApplyWorker = WorkerGridFactory.genericWorker(batchSize * dim, 256);
 
         // RoPE+KV cache: B*(dim/2) threads, local=512
         int ropeGlobal = batchSize * (qDim / 2);
@@ -555,11 +577,6 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         // MMA grids
         WorkerGrid mmaQkvWorker = mmaGrid(paddedBatch, qDim + 2 * kvDim); // fused QKV
         WorkerGrid mmaDimWorker = mmaGrid(paddedBatch, dim); // woProj, w2Proj
-        WorkerGrid mmaGateUpWorker = mmaGrid(paddedBatch, 2 * hidDim); // fused W1/W3
-
-        // Elementwise grids (one thread per valid element; dim & hidDim are mult. of 256)
-        WorkerGrid ewDimWorker = elementwiseGrid(batchSize * dim); // w2Resid
-        WorkerGrid ewHidWorker = elementwiseGrid(batchSize * hidDim); // swiglu
 
         for (int i = 0; i < config.numberOfLayers(); i++) {
             String p = "batchPrefillLayer_" + i + ".";
@@ -570,12 +587,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             addFamilyTaskGrids(scheduler, p, i);
             scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
             scheduler.addWorkerGrid(p + "woProj", mmaDimWorker);
-            scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);
-            scheduler.addWorkerGrid(p + "batch_ffn_rms_apply", ffnRmsApplyWorker);
-            scheduler.addWorkerGrid(p + "gateUpProj", mmaGateUpWorker);
-            scheduler.addWorkerGrid(p + "swiglu", ewHidWorker);
-            scheduler.addWorkerGrid(p + "w2Proj", mmaDimWorker);
-            scheduler.addWorkerGrid(p + "w2Resid", ewDimWorker);
+            addFeedForwardGrids(scheduler, p, i);
         }
     }
 

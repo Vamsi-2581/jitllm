@@ -79,6 +79,6 @@ public class Phi3FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillMM
 
     @Override
     protected float ropeTheta() {
-        return ((Phi3Configuration) config).ropeTheta();
+        return config.ropeTheta();
     }
 }

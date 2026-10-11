@@ -79,6 +79,6 @@ public class Phi3Q8_0LayersBatchPrefillMMA extends LlamaQ8_0LayersBatchPrefillMM
 
     @Override
     protected float ropeTheta() {
-        return ((Phi3Configuration) config).ropeTheta();
+        return config.ropeTheta();
     }
 }
