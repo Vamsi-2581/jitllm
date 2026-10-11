@@ -49,7 +49,10 @@ public final class Phi3PlanProvider implements TornadoPlanProvider {
         return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
     }
 
-    /** The batched prefill runs the Metal SIMD-group kernels only, for its fused QKV and gate/up weights. */
+    /**
+     * The batched prefill runs the Metal SIMD-group kernels only, for its fused QKV and gate/up
+     * weights.
+     */
     @Override
     public Optional<String> batchPrefillUnsupported(Combination c) {
         return BackendId.METAL.equals(c.backend())

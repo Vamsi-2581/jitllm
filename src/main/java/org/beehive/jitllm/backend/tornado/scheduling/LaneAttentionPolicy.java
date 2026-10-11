@@ -33,9 +33,9 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * Qwen3 (Q8_0, FP16), Qwen2 (Q8_0, FP16), Granite (Q8_0, through the scaled kernels) and Phi-3
  * (Q8_0, 96-wide heads) families. The FP32 key/value cache, the packed-half2 variant and the
  * non-split per-head kernel keep the kernels they had, as does the Qwen3.5 family (256-wide heads),
- * which has its own single-warp kernel.
- * The FP32-cache kernels ({@link #laneCooperativeAttentionFp32Cache}) are a separate, Metal-only
- * decision: Metal keeps the key/value cache in FP32.
+ * which has its own single-warp kernel. The FP32-cache kernels ({@link
+ * #laneCooperativeAttentionFp32Cache}) are a separate, Metal-only decision: Metal keeps the
+ * key/value cache in FP32.
  *
  * <p>Measured on one device, an RTX 5070 Ti (sm_120). The decision is a backend-level default
  * rather than a per-device measurement, and what it rests on is structural rather than incidental:

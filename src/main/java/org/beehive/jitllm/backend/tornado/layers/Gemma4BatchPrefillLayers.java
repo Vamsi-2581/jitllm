@@ -2040,7 +2040,8 @@ public class Gemma4BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                                                         / Gemma4BatchPrefillSimdgroupAttentionKernels
                                                                 .QUERY_TILE)
                                                 * nHead
-                                                * Gemma4BatchPrefillSimdgroupAttentionKernels.THREADS,
+                                                * Gemma4BatchPrefillSimdgroupAttentionKernels
+                                                        .THREADS,
                                         Gemma4BatchPrefillSimdgroupAttentionKernels.THREADS)
                                 : tensorCoreAttention(l)
                                         ? WorkerGridFactory.genericWorker(
@@ -2080,7 +2081,8 @@ public class Gemma4BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                     && (nativeProjections
                             || !int8GateUp[l]
                                     && (DEQUANT_GATE_UP
-                                            || !allQ8(weights.w1Layered[l], weights.w3Layered[l])))) {
+                                            || !allQ8(
+                                                    weights.w1Layered[l], weights.w3Layered[l])))) {
                 WorkerGrid dequantWorker = elementwise(ffnLen * dim, 256);
                 scheduler.addWorkerGrid(p + "gateDequant", dequantWorker);
                 scheduler.addWorkerGrid(p + "upDequant", dequantWorker);

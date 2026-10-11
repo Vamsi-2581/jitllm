@@ -562,18 +562,19 @@ public class Qwen2Q8_0FFNLayers
 
     /**
      * Binds the split-KV attention scratch and, where the packed projections run, the quantized
-     * activation buffers: uploaded once by layer 0 and passed along the graph chain. Called by the graph
-     * that opens a group, so subclasses that replace {@link #configureLayerDataTransfers} keep it.
+     * activation buffers: uploaded once by layer 0 and passed along the graph chain. Called by the
+     * graph that opens a group, so subclasses that replace {@link #configureLayerDataTransfers}
+     * keep it.
      */
     protected void bindDecodeScratch(TaskGraph unifiedLayer, int layerIndex) {
         Object[] scratch =
                 PackedActivationTasks.enabled()
-                    ? java.util.stream.Stream.concat(
-                                    java.util.stream.Stream.of(state.workspace.wrapAttSplit),
-                                    java.util.Arrays.stream(
-                                            PackedActivationTasks.buffers(state.workspace)))
-                            .toArray()
-                    : new Object[] {state.workspace.wrapAttSplit};
+                        ? java.util.stream.Stream.concat(
+                                        java.util.stream.Stream.of(state.workspace.wrapAttSplit),
+                                        java.util.Arrays.stream(
+                                                PackedActivationTasks.buffers(state.workspace)))
+                                .toArray()
+                        : new Object[] {state.workspace.wrapAttSplit};
         if (layerIndex == 0) {
             unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, scratch);
             return;

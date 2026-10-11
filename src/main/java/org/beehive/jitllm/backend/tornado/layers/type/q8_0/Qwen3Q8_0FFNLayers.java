@@ -137,8 +137,8 @@ public class Qwen3Q8_0FFNLayers
                                                 * attentionSplits
                                                 * SplitKvAttentionPolicy.NARROW_GROUP,
                                         SplitKvAttentionPolicy.NARROW_GROUP)
-                        : WorkerGridFactory.createAttentionWorker(
-                                config.numberOfHeads() * attentionSplits, nEmbdHead);
+                                : WorkerGridFactory.createAttentionWorker(
+                                        config.numberOfHeads() * attentionSplits, nEmbdHead);
         WorkerGrid attentionCombineWorker =
                 WorkerGridFactory.createAttentionWorker(config.numberOfHeads(), nEmbdHead);
         // One warp-group per (head, split) for the lane-cooperative kernel; unused when it is not

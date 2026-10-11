@@ -542,8 +542,9 @@ public class Qwen2FP16FFNLayers
     }
 
     /**
-     * Binds the split-KV attention scratch: uploaded once by layer 0 and passed along the graph chain. Called by the graph
-     * that opens a group, so subclasses that replace {@link #configureLayerDataTransfers} keep it.
+     * Binds the split-KV attention scratch: uploaded once by layer 0 and passed along the graph
+     * chain. Called by the graph that opens a group, so subclasses that replace {@link
+     * #configureLayerDataTransfers} keep it.
      */
     protected void bindDecodeScratch(TaskGraph unifiedLayer, int layerIndex) {
         Object[] scratch = {state.workspace.wrapAttSplit};

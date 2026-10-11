@@ -49,7 +49,10 @@ public final class GranitePlanProvider implements TornadoPlanProvider {
         return Fp16KeyValueSupport.singleTokenNvidiaLayers(c);
     }
 
-    /** The batched prefill runs the Metal SIMD-group kernels only, for its scaled residual and attention. */
+    /**
+     * The batched prefill runs the Metal SIMD-group kernels only, for its scaled residual and
+     * attention.
+     */
     @Override
     public Optional<String> batchPrefillUnsupported(Combination c) {
         return BackendId.METAL.equals(c.backend())
