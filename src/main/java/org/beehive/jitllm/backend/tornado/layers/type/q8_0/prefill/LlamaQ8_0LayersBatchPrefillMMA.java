@@ -189,6 +189,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         int dim = config.dim();
         int kvDim = config.kvDim();
         int hidDim = config.hiddenDim();
+        int qDim = config.numberOfHeads() * config.headSize();
 
         atLayerStart(batchPrefillLayer, layerIndex);
 
@@ -239,7 +240,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         state.workspace.wrapBlockTable,
                         state.kvBlockCfg,
                         state.kvBlockStride,
-                        dim);
+                        qDim);
             } else {
                 batchPrefillLayer.task(
                         "batch_rope_kv",
@@ -257,7 +258,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         state.workspace.wrapBlockTable,
                         state.kvBlockCfg,
                         state.kvBlockStride,
-                        dim);
+                        qDim);
             }
 
             // Register-partitioned P·V accumulation + direct FP16 emission
@@ -279,7 +280,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.wrapBlockTable,
                     state.kvBlockCfg,
                     state.kvBlockStride,
-                    dim);
+                    qDim);
         } else {
             if (splitHalfRope()) {
                 batchPrefillLayer.task(
@@ -297,7 +298,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         state.workspace.wrapBlockTable,
                         state.kvBlockCfg,
                         state.kvBlockStride,
-                        dim);
+                        qDim);
             } else {
                 batchPrefillLayer.task(
                         "batch_rope_kv",
@@ -315,7 +316,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         state.workspace.wrapBlockTable,
                         state.kvBlockCfg,
                         state.kvBlockStride,
-                        dim);
+                        qDim);
             }
 
             // Register-partitioned P·V accumulation + direct FP16 emission
@@ -337,7 +338,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.wrapBlockTable,
                     state.kvBlockCfg,
                     state.kvBlockStride,
-                    dim);
+                    qDim);
         }
 
         batchPrefillLayer.task(
@@ -349,7 +350,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 state.workspace.woOut,
                 paddedBatch,
                 dim,
-                dim);
+                qDim);
         afterAttentionOutputProjection(batchPrefillLayer, layerIndex);
 
         // ── FFN Block ──────────────────────────────────────────────────────────
@@ -433,6 +434,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     /** The QKV projection: packed {@code [q|k|v]} rows into {@code qkvResultBatch}. */
     protected void qkvProjection(TaskGraph batchPrefillLayer, int layerIndex) {
         int dim = config.dim();
+        int qDim = config.numberOfHeads() * config.headSize();
         int kvDim = config.kvDim();
         batchPrefillLayer.task(
                 "qkvProj",
@@ -444,7 +446,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 weights.wvLayered[layerIndex].asByteArray(),
                 state.workspace.qkvResultBatch,
                 paddedBatch,
-                dim,
+                qDim,
                 kvDim,
                 dim);
     }
@@ -524,6 +526,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         int dim = config.dim();
         int kvDim = config.kvDim();
         int hidDim = config.hiddenDim();
+        int qDim = config.numberOfHeads() * config.headSize();
         int nHeads = config.numberOfHeads();
         int headSz = config.headSize();
 
@@ -536,7 +539,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         WorkerGrid ffnRmsApplyWorker = WorkerGridFactory.genericWorker(batchSize * dim, 256);
 
         // RoPE+KV cache: B*(dim/2) threads, local=512
-        int ropeGlobal = batchSize * (dim / 2);
+        int ropeGlobal = batchSize * (qDim / 2);
         int ropeLocal = Math.min(512, ropeGlobal);
         while (ropeLocal > 1 && ropeGlobal % ropeLocal != 0) ropeLocal--;
         WorkerGrid ropeWorker = WorkerGridFactory.genericWorker(ropeGlobal, ropeLocal);
@@ -548,7 +551,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 WorkerGridFactory.genericWorker(batchSize * nHeads * attnLocal, attnLocal);
 
         // MMA grids
-        WorkerGrid mmaQkvWorker = mmaGrid(paddedBatch, dim + 2 * kvDim); // fused QKV
+        WorkerGrid mmaQkvWorker = mmaGrid(paddedBatch, qDim + 2 * kvDim); // fused QKV
         WorkerGrid mmaDimWorker = mmaGrid(paddedBatch, dim); // woProj, w2Proj
         WorkerGrid mmaGateUpWorker = mmaGrid(paddedBatch, 2 * hidDim); // fused W1/W3
 

@@ -38,35 +38,17 @@ public class TornadoPlanRegistryTest {
                 mistral.supportedModes());
     }
 
-    /**
-     * A STANDARD-only family declares exactly that, for every such family rather than one of them.
-     *
-     * <p>Devstral's {@code PREFILL_DECODE not yet supported for DEVSTRAL_2 + Q4_K} was read as a
-     * possible policy-resolution or diagnostic defect — a request for PREFILL_DECODE coming back
-     * labelled BATCH_PREFILL_DECODE. It is not: each mode reaches the registry through its own
-     * factory entry point and the refusal names the mode that was actually requested. This pins
-     * that, so a future change cannot quietly make one mode answer for another.
-     *
-     * <p>It also pins the scope. STANDARD_ONLY is a family-level declaration (Devstral here; Qwen2
-     * and Mistral gained batched prefill since); it is not specific to Devstral, and not specific
-     * to Q4_K — the dtype appears in the message text only because the message names the whole
-     * tuple.
-     */
-    @Test
-    public void everyStandardOnlyFamilyDeclaresStandardOnly() {
-        for (String architecture : Set.of("devstral")) {
-            assertEquals(
-                    architecture + " is STANDARD-only",
-                    Set.of(ExecutionMode.STANDARD),
-                    provider(architecture).supportedModes());
-        }
-    }
-
     /** Families with batched prefill but no sequential prefill/decode plan. */
     @Test
     public void batchedFamiliesDeclareStandardAndBatch() {
         for (String architecture :
-                Set.of("qwen2", "deepseek-r1-distill-qwen", "mistral", "phi3", "granite")) {
+                Set.of(
+                        "qwen2",
+                        "deepseek-r1-distill-qwen",
+                        "mistral",
+                        "phi3",
+                        "granite",
+                        "devstral")) {
             assertEquals(
                     architecture + " is STANDARD and BATCH_PREFILL_DECODE",
                     Set.of(ExecutionMode.STANDARD, ExecutionMode.BATCH_PREFILL_DECODE),

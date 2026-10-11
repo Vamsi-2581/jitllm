@@ -1,6 +1,8 @@
 package org.beehive.jitllm.backend.tornado.plan;
 
+import java.util.Optional;
 import java.util.Set;
+import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.lowering.TornadoSupportSets;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.fp16.DevstralFP16PlanComponents;
@@ -33,7 +35,20 @@ public final class DevstralPlanProvider implements TornadoPlanProvider {
 
     @Override
     public Set<ExecutionMode> supportedModes() {
-        return TornadoSupportSets.STANDARD_ONLY;
+        return TornadoSupportSets.STANDARD_AND_BATCH;
+    }
+
+    /**
+     * The batched prefill runs Llama's tensor-core layers, for Q8_0 weights; the F16 and Q4_K
+     * layers have single-token plans only.
+     */
+    @Override
+    public Optional<String> batchPrefillUnsupported(Combination c) {
+        return c.weights() == DataType.Q8_0 && c.tensorCores()
+                ? Optional.empty()
+                : Optional.of(
+                        "the devstral batched prefill runs on the CUDA tensor cores, for Q8_0"
+                                + " weights");
     }
 
     @Override
