@@ -59,8 +59,9 @@ public final class MistralPlanProvider implements TornadoPlanProvider {
         if (c.weights() != DataType.F16 && c.weights() != DataType.Q8_0) {
             return Optional.of("the " + c.weights() + " layers keep an FP32 cache");
         }
-        return c.mode() == ExecutionMode.STANDARD
-                ? Optional.empty()
-                : Optional.of("mistral has single-token plans only");
+        // Batched plans run Llama's layers, prefill and decode, which write the FP16 cache too.
+        return c.mode() == ExecutionMode.PREFILL_DECODE
+                ? Optional.of("mistral's sequential prefill/decode plan keeps an FP32 cache")
+                : Optional.empty();
     }
 }

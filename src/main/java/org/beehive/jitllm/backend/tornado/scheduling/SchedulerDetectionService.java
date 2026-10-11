@@ -72,4 +72,16 @@ public class SchedulerDetectionService {
         boolean isNotMistral = model.getModelType() != ModelType.MISTRAL;
         return (singlePassRms && isNotMistral) ? SchedulerType.NVIDIA : SchedulerType.NON_NVIDIA;
     }
+
+    /**
+     * The scheduler of Llama's layer graphs, whichever model's weights they run: the device half of
+     * {@link #determineSchedulerType} alone. Mistral's batched plans run Llama's layers, and those
+     * layers do not carry the attention that keeps Mistral's own single-token layers off the NVIDIA
+     * scheduler.
+     */
+    public static SchedulerType llamaLayerSchedulerType() {
+        return TornadoDevices.target().capabilities().supports(DeviceCapability.SINGLE_PASS_RMS)
+                ? SchedulerType.NVIDIA
+                : SchedulerType.NON_NVIDIA;
+    }
 }

@@ -56,7 +56,8 @@ public class LlamaQ8_0PlanComponents
         this.state = state;
         this.config = config;
         this.weights = (LlamaTornadoWeights) model.weights();
-        this.schedulerType = SchedulerDetectionService.determineSchedulerType(model);
+        // Another family's weights on Llama's layers: their scheduler, not that family's.
+        this.schedulerType = SchedulerDetectionService.llamaLayerSchedulerType();
     }
 
     // ── Activations ───────────────────────────────────────────────────────────
