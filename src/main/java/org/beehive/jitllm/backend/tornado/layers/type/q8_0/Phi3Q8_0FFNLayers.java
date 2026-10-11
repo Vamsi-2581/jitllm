@@ -6,9 +6,11 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ8_0D
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvKernels;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Phi3State;
+import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Phi3TornadoWeights;
 import org.beehive.jitllm.model.phi3.Phi3Configuration;
 import uk.ac.manchester.tornado.api.GridScheduler;
@@ -106,7 +108,15 @@ public class Phi3Q8_0FFNLayers
                         l + "ffn_down_proj", configDimRowMajorGlobalWorker);
             }
             tornadoForwardScheduler.addWorkerGrid(l + "rope_and_kv_cache", ropeWorker);
-            tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
+            if (laneAttention(config.headSize())) {
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attention",
+                        LaneAttentionPolicy.worker(
+                                config.numberOfHeads() * State.SPLIT_KV, config.headSize()));
+                tornadoForwardScheduler.addWorkerGrid(l + "attention_combine", parallelAttentionWorker);
+            } else {
+                tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
+            }
             tornadoForwardScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
         }
 
@@ -299,7 +309,37 @@ public class Phi3Q8_0FFNLayers
         }
 
         // Flash Attention
-        if (useFp16KVCache()) {
+        if (laneAttention(config.headSize())) {
+            // Split-KV with the 96-wide lane-cooperative kernel; the combine pass merges the
+            // partials.
+            unifiedLayer.task(
+                    tp + "attention",
+                    LaneAttentionPolicy.kernel(config.headSize()),
+                    context,
+                    phi3State.workspace.wrapQ,
+                    phi3State.workspace.wrapKeyCacheFP16,
+                    phi3State.workspace.wrapValueCacheFP16,
+                    phi3State.workspace.wrapAttSplit,
+                    config.numberOfHeads(),
+                    config.headSize(),
+                    config.kvDim(),
+                    config.kvMul(),
+                    phi3State.workspace.positionHolder,
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    State.SPLIT_KV);
+            unifiedLayer.task(
+                    tp + "attention_combine",
+                    TransformerComputeKernelsLayered::combineSplitKVAttention,
+                    context,
+                    phi3State.workspace.wrapAttSplit,
+                    phi3State.workspace.wrapXb,
+                    config.numberOfHeads(),
+                    config.headSize(),
+                    State.SPLIT_KV);
+        } else if (useFp16KVCache()) {
             unifiedLayer.task(
                     tp + "attention",
                     TransformerPagedKvKernels::processHeadsFlashAttentionFP16Paged,
@@ -501,6 +541,8 @@ public class Phi3Q8_0FFNLayers
             // the kernels reading a mapping that no longer exists, silently.
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
+            unifiedLayer.transferToDevice(
+                    DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
             if (PackedActivationTasks.enabled()) {
                 unifiedLayer.transferToDevice(
                         DataTransferMode.FIRST_EXECUTION,
@@ -525,6 +567,7 @@ public class Phi3Q8_0FFNLayers
                     phi3State.workspace.wrapQkv);
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
+            unifiedLayer.consumeFromDevice(state.workspace.wrapAttSplit);
             if (PackedActivationTasks.enabled()) {
                 unifiedLayer.consumeFromDevice(PackedActivationTasks.buffers(state.workspace));
             }

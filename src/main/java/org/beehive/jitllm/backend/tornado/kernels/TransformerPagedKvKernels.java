@@ -768,7 +768,7 @@ public class TransformerPagedKvKernels {
      * wrong grid would be silent rather than fatal.
      */
     // @formatter:on
-    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead128(
+    private static void laneHead128(
             KernelContext context,
             FloatArray q,
             HalfFloatArray key_cache,
@@ -783,9 +783,12 @@ public class TransformerPagedKvKernels {
             IntArray blockTable,
             int blockCfg,
             int blockStride,
-            int nSplits) {
+            int nSplits,
+            float scoreScale,
+            float[] partial,
+            float[] mShared,
+            float[] lShared) {
 
-        final int MAX_WARPS = 16;
         final int HEAD = 128;
 
         int tid = context.localIdx;
@@ -811,7 +814,7 @@ public class TransformerPagedKvKernels {
 
         int layerOff = KvBlockAddress.layerOffset(layer, kvDim, blockCfg);
         int kvHeadIdx = h / kvMul;
-        float invSqrt = 1.0f / TornadoMath.sqrt(headSize);
+        float invSqrt = scoreScale;
 
         int dA = lane * 2;
         int dB = 64 + lane * 2;
@@ -822,9 +825,6 @@ public class TransformerPagedKvKernels {
         float q2 = q.get(qBase + dB);
         float q3 = q.get(qBase + dB + 1);
 
-        float[] partial = context.allocateFloatLocalArray(MAX_WARPS * HEAD);
-        float[] mShared = context.allocateFloatLocalArray(MAX_WARPS);
-        float[] lShared = context.allocateFloatLocalArray(MAX_WARPS);
 
         float acc0 = 0.0f;
         float acc1 = 0.0f;
@@ -879,6 +879,98 @@ public class TransformerPagedKvKernels {
         }
         context.localBarrier();
         foldLaneWarps(context, partial, mShared, lShared, att, headSize, HEAD, nSplits, h, s);
+    }
+
+    /**
+     * {@link #laneHead128}, the score scaled by {@code 1/sqrt(headSize)}.
+     *
+     * <p>Worker: {@code nHeads * nSplits} groups of whole warps, at most {@code 16}.
+     */
+    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead128(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray att,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride,
+            int nSplits) {
+        float[] partial = context.allocateFloatLocalArray(16 * 128);
+        float[] mShared = context.allocateFloatLocalArray(16);
+        float[] lShared = context.allocateFloatLocalArray(16);
+        laneHead128(
+                context,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                nHeads,
+                headSize,
+                kvDim,
+                kvMul,
+                positionHolder,
+                layer,
+                blockTable,
+                blockCfg,
+                blockStride,
+                nSplits,
+                1.0f / TornadoMath.sqrt(headSize),
+                partial,
+                mShared,
+                lShared);
+    }
+
+    /**
+     * {@link #laneHead128}, the score scaled by {@code scoreScale}: for a family whose attention
+     * multiplier is not {@code 1/sqrt(headSize)} (Granite's).
+     */
+    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead128Scaled(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray att,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride,
+            int nSplits,
+            float scoreScale) {
+        float[] partial = context.allocateFloatLocalArray(16 * 128);
+        float[] mShared = context.allocateFloatLocalArray(16);
+        float[] lShared = context.allocateFloatLocalArray(16);
+        laneHead128(
+                context,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                nHeads,
+                headSize,
+                kvDim,
+                kvMul,
+                positionHolder,
+                layer,
+                blockTable,
+                blockCfg,
+                blockStride,
+                nSplits,
+                scoreScale,
+                partial,
+                mShared,
+                lShared);
     }
 
     // @formatter:off
@@ -959,7 +1051,7 @@ public class TransformerPagedKvKernels {
      * <p>Worker: {@code nHeads * nSplits} groups of {@code warps * 32} lanes.
      */
     // @formatter:on
-    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead64(
+    private static void laneHead64(
             KernelContext context,
             FloatArray q,
             HalfFloatArray key_cache,
@@ -974,9 +1066,12 @@ public class TransformerPagedKvKernels {
             IntArray blockTable,
             int blockCfg,
             int blockStride,
-            int nSplits) {
+            int nSplits,
+            float scoreScale,
+            float[] partial,
+            float[] mShared,
+            float[] lShared) {
 
-        final int MAX_WARPS = 16;
         final int HEAD = 64;
 
         int tid = context.localIdx;
@@ -985,10 +1080,6 @@ public class TransformerPagedKvKernels {
         int warp = tid >> 5;
         int nWarps = blockSize >> 5;
         int g = context.groupIdx;
-
-        float[] partial = context.allocateFloatLocalArray(MAX_WARPS * HEAD);
-        float[] mShared = context.allocateFloatLocalArray(MAX_WARPS);
-        float[] lShared = context.allocateFloatLocalArray(MAX_WARPS);
 
         // Uniform across the group, so every lane of a group takes the same branch.
         if (g < nHeads * nSplits) {
@@ -1004,7 +1095,7 @@ public class TransformerPagedKvKernels {
 
             int layerOff = KvBlockAddress.layerOffset(layer, kvDim, blockCfg);
             int kvHeadIdx = h / kvMul;
-            float invSqrt = 1.0f / TornadoMath.sqrt(headSize);
+            float invSqrt = scoreScale;
 
             int d = lane * 2;
             float q0 = q.get(h * headSize + d);
@@ -1050,6 +1141,254 @@ public class TransformerPagedKvKernels {
             context.localBarrier();
             foldLaneWarps(context, partial, mShared, lShared, att, headSize, HEAD, nSplits, h, s);
         }
+    }
+
+    /**
+     * {@link #laneHead64}, the score scaled by {@code 1/sqrt(headSize)}.
+     *
+     * <p>Worker: {@code nHeads * nSplits} groups of whole warps, at most {@code 16}.
+     */
+    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead64(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray att,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride,
+            int nSplits) {
+        float[] partial = context.allocateFloatLocalArray(16 * 64);
+        float[] mShared = context.allocateFloatLocalArray(16);
+        float[] lShared = context.allocateFloatLocalArray(16);
+        laneHead64(
+                context,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                nHeads,
+                headSize,
+                kvDim,
+                kvMul,
+                positionHolder,
+                layer,
+                blockTable,
+                blockCfg,
+                blockStride,
+                nSplits,
+                1.0f / TornadoMath.sqrt(headSize),
+                partial,
+                mShared,
+                lShared);
+    }
+
+    /**
+     * {@link #laneHead64}, the score scaled by {@code scoreScale}: for a family whose attention
+     * multiplier is not {@code 1/sqrt(headSize)} (Granite's).
+     */
+    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead64Scaled(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray att,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride,
+            int nSplits,
+            float scoreScale) {
+        float[] partial = context.allocateFloatLocalArray(16 * 64);
+        float[] mShared = context.allocateFloatLocalArray(16);
+        float[] lShared = context.allocateFloatLocalArray(16);
+        laneHead64(
+                context,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                nHeads,
+                headSize,
+                kvDim,
+                kvMul,
+                positionHolder,
+                layer,
+                blockTable,
+                blockCfg,
+                blockStride,
+                nSplits,
+                scoreScale,
+                partial,
+                mShared,
+                lShared);
+    }
+
+    // @formatter:off
+    /**
+     * Lane-cooperative split-KV attention for a 96-wide head over an FP16 paged cache (Phi-3's),
+     * the {@link #laneHead64} scheme with a third dimension per lane: lane {@code L} holds {@code
+     * 2L}, {@code 2L+1} and {@code 64+L}. The partial-output layout is the one {@code
+     * combineSplitKVAttention} reads.
+     */
+    // @formatter:on
+    private static void laneHead96(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray att,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride,
+            int nSplits,
+            float scoreScale,
+            float[] partial,
+            float[] mShared,
+            float[] lShared) {
+
+        final int HEAD = 96;
+
+        int tid = context.localIdx;
+        int blockSize = context.localGroupSizeX;
+        int lane = tid & 31;
+        int warp = tid >> 5;
+        int nWarps = blockSize >> 5;
+        int g = context.groupIdx;
+
+        // Uniform across the group, so every lane of a group takes the same branch.
+        if (g < nHeads * nSplits) {
+            int h = g / nSplits;
+            int s = g % nSplits;
+
+            int pos = positionHolder.get(0);
+            int slot = positionHolder.get(1);
+            int seqLen = pos + 1;
+            int chunk = (seqLen + nSplits - 1) / nSplits;
+            int startPos = s * chunk;
+            int endPos = Math.min(startPos + chunk, seqLen); // exclusive
+
+            int layerOff = KvBlockAddress.layerOffset(layer, kvDim, blockCfg);
+            int kvHeadIdx = h / kvMul;
+            float invSqrt = scoreScale;
+
+            // Lane L owns the pair 2L, 2L+1 (dimensions 0..63) and the single dimension 64+L
+            // (64..95): one coalesced half-pair load and one coalesced half load per key.
+            int d = lane * 2;
+            int e2 = 64 + lane;
+            float q0 = q.get(h * headSize + d);
+            float q1 = q.get(h * headSize + d + 1);
+            float q2 = q.get(h * headSize + e2);
+
+            float acc0 = 0.0f;
+            float acc1 = 0.0f;
+            float acc2 = 0.0f;
+            float m = Float.NEGATIVE_INFINITY;
+            float l = 0.0f;
+
+            for (int p = startPos + warp; p < endPos; p += nWarps) {
+                int base =
+                        KvBlockAddress.offset(
+                                        blockTable, slot, p, layerOff, kvDim, blockCfg, blockStride)
+                                + kvHeadIdx * headSize;
+
+                Half2 k = key_cache.getHalf2(base + d);
+                float part =
+                        q0 * Half2.lowFloat(k)
+                                + q1 * Half2.highFloat(k)
+                                + q2 * key_cache.get(base + e2).getFloat32();
+                part += context.simdShuffleDown(part, 16);
+                part += context.simdShuffleDown(part, 8);
+                part += context.simdShuffleDown(part, 4);
+                part += context.simdShuffleDown(part, 2);
+                part += context.simdShuffleDown(part, 1);
+                float score = context.simdBroadcastFirst(part) * invSqrt;
+
+                float newM = Math.max(m, score);
+                float corr = (m == Float.NEGATIVE_INFINITY) ? 0.0f : TornadoMath.exp(m - newM);
+                float e = TornadoMath.exp(score - newM);
+
+                Half2 v = value_cache.getHalf2(base + d);
+                acc0 = acc0 * corr + e * Half2.lowFloat(v);
+                acc1 = acc1 * corr + e * Half2.highFloat(v);
+                acc2 = acc2 * corr + e * value_cache.get(base + e2).getFloat32();
+                l = l * corr + e;
+                m = newM;
+            }
+
+            partial[warp * HEAD + d] = acc0;
+            partial[warp * HEAD + d + 1] = acc1;
+            partial[warp * HEAD + e2] = acc2;
+            if (lane == 0) {
+                mShared[warp] = m;
+                lShared[warp] = l;
+            }
+            context.localBarrier();
+            foldLaneWarps(context, partial, mShared, lShared, att, headSize, HEAD, nSplits, h, s);
+        }
+    }
+
+    /**
+     * {@link #laneHead96}, the score scaled by {@code 1/sqrt(headSize)}.
+     *
+     * <p>Worker: {@code nHeads * nSplits} groups of whole warps, at most {@code 16}.
+     */
+    public static void processHeadsFlashAttentionSplitKVFP16PagedLaneHead96(
+            KernelContext context,
+            FloatArray q,
+            HalfFloatArray key_cache,
+            HalfFloatArray value_cache,
+            FloatArray att,
+            int nHeads,
+            int headSize,
+            int kvDim,
+            int kvMul,
+            IntArray positionHolder,
+            int layer,
+            IntArray blockTable,
+            int blockCfg,
+            int blockStride,
+            int nSplits) {
+        float[] partial = context.allocateFloatLocalArray(16 * 96);
+        float[] mShared = context.allocateFloatLocalArray(16);
+        float[] lShared = context.allocateFloatLocalArray(16);
+        laneHead96(
+                context,
+                q,
+                key_cache,
+                value_cache,
+                att,
+                nHeads,
+                headSize,
+                kvDim,
+                kvMul,
+                positionHolder,
+                layer,
+                blockTable,
+                blockCfg,
+                blockStride,
+                nSplits,
+                1.0f / TornadoMath.sqrt(headSize),
+                partial,
+                mShared,
+                lShared);
     }
 
     public static void processHeadsFlashAttentionSplitKVFP16Paged(

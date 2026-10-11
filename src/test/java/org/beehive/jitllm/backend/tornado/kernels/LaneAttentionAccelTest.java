@@ -51,7 +51,7 @@ public class LaneAttentionAccelTest {
 
     @Parameterized.Parameters(name = "head {0}")
     public static List<Integer> headSizes() {
-        return List.of(64, 128);
+        return List.of(64, 96, 128);
     }
 
     private final int headSize;

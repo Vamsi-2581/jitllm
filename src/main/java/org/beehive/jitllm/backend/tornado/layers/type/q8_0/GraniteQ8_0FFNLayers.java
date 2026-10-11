@@ -6,9 +6,11 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayer
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ8_0DP4A;
 import org.beehive.jitllm.backend.tornado.layers.AbstractTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.PackedActivationTasks;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.GraniteState;
+import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.GraniteTornadoWeights;
 import org.beehive.jitllm.model.granite.GraniteConfiguration;
 import uk.ac.manchester.tornado.api.GridScheduler;
@@ -303,6 +305,13 @@ public class GraniteQ8_0FFNLayers
 
     // @formatter:on
 
+    /** Whether attention runs the scaled lane-cooperative split-KV kernel. */
+    private boolean laneAttention() {
+        return useFp16KVCache()
+                && !packedHalf2Attention
+                && LaneAttentionPolicy.scaledLaneCooperativeAttention(config.headSize());
+    }
+
     /** Adjacent decode layers per graph, which removes all but one host round trip per group. */
     @Override
     protected int layersPerGraph() {
@@ -341,6 +350,8 @@ public class GraniteQ8_0FFNLayers
             // the kernels reading a mapping that no longer exists, silently.
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
+            unifiedLayer.transferToDevice(
+                    DataTransferMode.FIRST_EXECUTION, state.workspace.wrapAttSplit);
             if (PackedActivationTasks.enabled()) {
                 unifiedLayer.transferToDevice(
                         DataTransferMode.FIRST_EXECUTION,
@@ -362,6 +373,7 @@ public class GraniteQ8_0FFNLayers
                     state.workspace.positionHolder);
             unifiedLayer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
+            unifiedLayer.consumeFromDevice(state.workspace.wrapAttSplit);
             if (PackedActivationTasks.enabled()) {
                 unifiedLayer.consumeFromDevice(PackedActivationTasks.buffers(state.workspace));
             }
@@ -437,7 +449,15 @@ public class GraniteQ8_0FFNLayers
                         l + "ffn_down_proj", configDimRowMajorGlobalWorker);
             }
             tornadoForwardScheduler.addWorkerGrid(l + "rope_and_kv_cache", ropeWithCacheWorker);
-            tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
+            if (laneAttention()) {
+                tornadoForwardScheduler.addWorkerGrid(
+                        l + "attention",
+                        LaneAttentionPolicy.worker(
+                                config.numberOfHeads() * State.SPLIT_KV, config.headSize()));
+                tornadoForwardScheduler.addWorkerGrid(l + "attention_combine", parallelAttentionWorker);
+            } else {
+                tornadoForwardScheduler.addWorkerGrid(l + "attention", parallelAttentionWorker);
+            }
             tornadoForwardScheduler.addWorkerGrid(l + "ffn_rms_reduce", rmsReduceWorker);
         }
 
@@ -448,6 +468,38 @@ public class GraniteQ8_0FFNLayers
     private TaskGraph configureAttention(
             TaskGraph unifiedLayer, int layerIndex, GraniteConfiguration config) {
         String tp = layerTaskPrefix(layerIndex);
+        if (laneAttention()) {
+            // Split-KV with the lane-cooperative kernel, scored by Granite's attention multiplier
+            // rather than 1/sqrt(headSize); the combine pass merges the partials.
+            unifiedLayer.task(
+                    tp + "attention",
+                    LaneAttentionPolicy.scaledKernel(config.headSize()),
+                    context,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapKeyCacheFP16,
+                    state.workspace.wrapValueCacheFP16,
+                    state.workspace.wrapAttSplit,
+                    config.numberOfHeads(),
+                    config.headSize(),
+                    config.kvDim(),
+                    config.kvMul(),
+                    state.workspace.positionHolder,
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    State.SPLIT_KV,
+                    config.attentionScale());
+            return unifiedLayer.task(
+                    tp + "attention_combine",
+                    TransformerComputeKernelsLayered::combineSplitKVAttention,
+                    context,
+                    state.workspace.wrapAttSplit,
+                    state.workspace.wrapXb,
+                    config.numberOfHeads(),
+                    config.headSize(),
+                    State.SPLIT_KV);
+        }
         if (schedulerType == SchedulerType.NVIDIA) {
             // Flash Attention (optimized for NVIDIA GPUs)
             if (useFp16KVCache()) {

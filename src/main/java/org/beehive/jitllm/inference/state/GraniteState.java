@@ -74,6 +74,9 @@ public final class GraniteState extends State {
                             "Unsupported quantization format: " + config.quantization());
         }
         workspace.wrapLogits = TornadoWorkspaces.floats(config.vocabularySize());
+        workspace.wrapAttSplit =
+                TornadoWorkspaces.floats(
+                        config.numberOfHeads() * SPLIT_KV * (config.headSize() + 2));
         workspace.wrapQ = TornadoWorkspaces.floats(config.dim());
         workspace.wrapK = TornadoWorkspaces.floats(config.dim());
         workspace.wrapV = TornadoWorkspaces.floats(config.dim());

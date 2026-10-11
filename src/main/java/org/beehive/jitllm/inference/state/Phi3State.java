@@ -120,6 +120,9 @@ public class Phi3State extends State {
 
         // Attention wrapper
         workspace.wrapAtt = TornadoWorkspaces.floats(nHeads * contextLength);
+        workspace.wrapAttSplit =
+                TornadoWorkspaces.floats(
+                        config.numberOfHeads() * SPLIT_KV * (config.headSize() + 2));
 
         // Position holder for GPU operations
         // [0] = position, [1] = table-local KV slot.
