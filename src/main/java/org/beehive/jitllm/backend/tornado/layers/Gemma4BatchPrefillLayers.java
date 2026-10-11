@@ -658,13 +658,16 @@ public class Gemma4BatchPrefillLayers implements BatchPrefillTransformerLayerTas
     // @formatter:on
     private static void requireDecodable(TornadoTensor t, String name) {
         DataType type = t.dataType();
-        if (type != DataType.Q8_0 && type != DataType.Q4_0 && type != DataType.Q4_1) {
+        if (type != DataType.Q8_0
+                && type != DataType.Q4_0
+                && type != DataType.Q4_1
+                && type != DataType.F16) {
             throw new UnsupportedOperationException(
                     "gemma4 batched prefill has no decoder for "
                             + type
                             + " ("
                             + name
-                            + "); the trunk must be Q8_0, Q4_0 or Q4_1");
+                            + "); the trunk must be Q8_0, Q4_0, Q4_1 or F16");
         }
     }
 
@@ -716,6 +719,15 @@ public class Gemma4BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                             w.asByteArray(),
                             state.workspace.weightsF16Scratch,
                             destOffset);
+            case F16 ->
+                    layer.task(
+                            taskName,
+                            Gemma4BatchPrefillKernels::copyF16,
+                            context,
+                            w.asHalfFloatArray(),
+                            state.workspace.weightsF16Scratch,
+                            destOffset,
+                            w.asHalfFloatArray().getSize());
             default ->
                     throw new UnsupportedOperationException(
                             "gemma4 batched prefill has no decoder for " + w.dataType());
