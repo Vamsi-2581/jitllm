@@ -105,12 +105,9 @@ public class Fp16KeyValueSupportTest {
         assertTrue(
                 check("qwen3", DataType.Q4_0, ExecutionMode.STANDARD, BackendId.CUDA, true, true)
                         .isPresent());
-        assertTrue(
-                check("gemma4", DataType.F16, ExecutionMode.STANDARD, BackendId.CUDA, true, true)
-                        .isPresent());
-        // The quantized gemma4 layers write and read FP16 in both of the family's modes, on CUDA
-        // and on OpenCL on an NVIDIA-class device.
-        for (DataType weights : new DataType[] {DataType.Q8_0, DataType.Q4_0}) {
+        // The gemma4 layers, quantized and F16, write and read FP16 in both of the family's modes,
+        // on CUDA and on OpenCL on an NVIDIA-class device.
+        for (DataType weights : new DataType[] {DataType.Q8_0, DataType.Q4_0, DataType.F16}) {
             for (ExecutionMode mode :
                     new ExecutionMode[] {
                         ExecutionMode.STANDARD, ExecutionMode.BATCH_PREFILL_DECODE

@@ -76,8 +76,8 @@ public final class Qwen2MoEQ8_0FFNLayersDecode extends Qwen2MoEQ8_0FFNLayers {
                     moeState.workspace.wrapSharedOutput);
             layer.consumeFromDevice(
                     "decodeActivation",
-                    moeState.workspace.wrapKeyCache,
-                    moeState.workspace.wrapValueCache);
+                    keyCache(),
+                    valueCache());
             layer.consumeFromDevice("decodeActivation", state.workspace.wrapBlockTable);
         } else {
             String predecessor = "layer_" + (layerIndex - 1);
@@ -89,8 +89,8 @@ public final class Qwen2MoEQ8_0FFNLayersDecode extends Qwen2MoEQ8_0FFNLayers {
                     moeState.workspace.wrapQ,
                     moeState.workspace.wrapK,
                     moeState.workspace.wrapV,
-                    moeState.workspace.wrapKeyCache,
-                    moeState.workspace.wrapValueCache,
+                    keyCache(),
+                    valueCache(),
                     moeState.workspace.wrapAtt,
                     moeState.workspace.wrapRouterLogits,
                     moeState.workspace.wrapSelectedExperts,

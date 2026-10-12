@@ -107,24 +107,45 @@ public class DevstralQ8_0FFNLayers
                 LOCAL_WORK_GROUP_SIZE_ALLOC);
 
         // Use precomputed RoPE frequencies (YaRN-scaled)
-        unifiedLayer.task(
-                "rope_and_kv_cache",
-                TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedPaged,
-                context,
-                state.workspace.positionHolder,
-                state.workspace.wrapQ,
-                state.workspace.wrapK,
-                state.workspace.wrapV,
-                state.workspace.wrapKeyCache,
-                state.workspace.wrapValueCache,
-                weights.freq_cis_realFlat.asFloatArray(),
-                weights.freq_cis_imagFlat.asFloatArray(),
-                config.kvDim(),
-                config.headSize(),
-                layerIndex,
-                state.workspace.wrapBlockTable,
-                state.kvBlockCfg,
-                state.kvBlockStride);
+        if (useFp16KVCache()) {
+            unifiedLayer.task(
+                    "rope_and_kv_cache",
+                    TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedFP16Paged,
+                    context,
+                    state.workspace.positionHolder,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapK,
+                    state.workspace.wrapV,
+                    state.workspace.wrapKeyCacheFP16,
+                    state.workspace.wrapValueCacheFP16,
+                    weights.freq_cis_realFlat.asFloatArray(),
+                    weights.freq_cis_imagFlat.asFloatArray(),
+                    config.kvDim(),
+                    config.headSize(),
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride);
+        } else {
+            unifiedLayer.task(
+                    "rope_and_kv_cache",
+                    TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedPaged,
+                    context,
+                    state.workspace.positionHolder,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapK,
+                    state.workspace.wrapV,
+                    state.workspace.wrapKeyCache,
+                    state.workspace.wrapValueCache,
+                    weights.freq_cis_realFlat.asFloatArray(),
+                    weights.freq_cis_imagFlat.asFloatArray(),
+                    config.kvDim(),
+                    config.headSize(),
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride);
+        }
 
         configureAttention(unifiedLayer, layerIndex);
 
@@ -189,6 +210,16 @@ public class DevstralQ8_0FFNLayers
         return unifiedLayer;
     }
 
+    /** The key cache in the representation the state holds: FP16 where it allocated one. */
+    protected Object keyCache() {
+        return useFp16KVCache() ? state.workspace.wrapKeyCacheFP16 : state.workspace.wrapKeyCache;
+    }
+
+    /** The value cache in the representation the state holds. */
+    protected Object valueCache() {
+        return useFp16KVCache() ? state.workspace.wrapValueCacheFP16 : state.workspace.wrapValueCache;
+    }
+
     /** The graph whose {@code wrapX} this layer reads, or {@code null} for the unnamed consume. */
     protected String predecessorGraphName(int layerIndex) {
         return null;
@@ -214,8 +245,8 @@ public class DevstralQ8_0FFNLayers
                     state.workspace.wrapQ,
                     state.workspace.wrapK,
                     state.workspace.wrapV,
-                    state.workspace.wrapKeyCache,
-                    state.workspace.wrapValueCache,
+                    keyCache(),
+                    valueCache(),
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
                     weights.freq_cis_realFlat.asFloatArray(),
@@ -233,8 +264,8 @@ public class DevstralQ8_0FFNLayers
                     state.workspace.wrapQ,
                     state.workspace.wrapK,
                     state.workspace.wrapV,
-                    state.workspace.wrapKeyCache,
-                    state.workspace.wrapValueCache,
+                    keyCache(),
+                    valueCache(),
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
                     state.workspace.positionHolder,
@@ -294,6 +325,25 @@ public class DevstralQ8_0FFNLayers
 
     private TaskGraph configureAttention(TaskGraph unifiedLayer, int layerIndex) {
         if (schedulerType == SchedulerType.NVIDIA) {
+            if (useFp16KVCache()) {
+                return unifiedLayer.task(
+                        "attention",
+                        TransformerPagedKvKernels::processHeadsFlashAttentionFP16Paged,
+                        context,
+                        state.workspace.wrapQ,
+                        state.workspace.wrapKeyCacheFP16,
+                        state.workspace.wrapValueCacheFP16,
+                        state.workspace.wrapXb,
+                        config.numberOfHeads(),
+                        config.headSize(),
+                        config.kvDim(),
+                        config.kvMul(),
+                        state.workspace.positionHolder,
+                        layerIndex,
+                        state.workspace.wrapBlockTable,
+                        state.kvBlockCfg,
+                        state.kvBlockStride);
+            }
             return unifiedLayer.task(
                     "attention",
                     TransformerPagedKvKernels::processHeadsFlashAttentionPaged,

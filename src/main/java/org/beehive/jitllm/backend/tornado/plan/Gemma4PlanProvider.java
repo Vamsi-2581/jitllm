@@ -122,12 +122,14 @@ public final class Gemma4PlanProvider implements TornadoPlanProvider {
 
     /**
      * The quantized layers' FP16 writers and grouped attention, in both of this family's modes: the
-     * shuffle-reduced grouped kernel on CUDA, its shared-memory twin on OpenCL. The FP16/BF16
-     * layers keep FP32.
+     * shuffle-reduced grouped kernel on CUDA, its shared-memory twin on OpenCL. The F16 (BF16 file)
+     * layers write the FP16 cache too, attending with the split kernel.
      */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
-        if (c.weights() != DataType.Q8_0 && c.weights() != DataType.Q4_0) {
+        if (c.weights() != DataType.Q8_0
+                && c.weights() != DataType.Q4_0
+                && c.weights() != DataType.F16) {
             return Optional.of("the gemma4 " + c.weights() + " layers keep an FP32 cache");
         }
         return Optional.empty();

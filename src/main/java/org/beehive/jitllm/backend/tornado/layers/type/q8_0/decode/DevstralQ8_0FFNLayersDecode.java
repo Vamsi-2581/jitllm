@@ -57,7 +57,7 @@ public class DevstralQ8_0FFNLayersDecode extends DevstralQ8_0FFNLayers {
                     weights.freq_cis_imagFlat.asFloatArray());
             layer.consumeFromDevice(
                     "decodeActivation",
-                    state.workspace.wrapKeyCache,
+                    keyCache(),
                     state.workspace.wrapValueCache);
             layer.consumeFromDevice("decodeActivation", state.workspace.wrapBlockTable);
         } else {
@@ -70,8 +70,8 @@ public class DevstralQ8_0FFNLayersDecode extends DevstralQ8_0FFNLayers {
                     state.workspace.wrapQ,
                     state.workspace.wrapK,
                     state.workspace.wrapV,
-                    state.workspace.wrapKeyCache,
-                    state.workspace.wrapValueCache,
+                    keyCache(),
+                    valueCache(),
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
                     state.workspace.positionHolder,

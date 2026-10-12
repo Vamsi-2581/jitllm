@@ -39,6 +39,23 @@ public final class DevstralPlanProvider implements TornadoPlanProvider {
     }
 
     /**
+     * The Q8_0 layers write the FP16 cache on the NVIDIA path, single-token and after the
+     * tensor-core batched prefill, which writes it too; the F16 and Q4_K layers keep FP32.
+     */
+    @Override
+    public Optional<String> fp16KeyValueUnsupported(Combination c) {
+        if (!c.nvidiaScheduler()) {
+            return Optional.of("the non-NVIDIA decode layers keep an FP32 cache");
+        }
+        if (c.weights() != DataType.Q8_0) {
+            return Optional.of("the devstral " + c.weights() + " layers keep an FP32 cache");
+        }
+        return c.mode() == ExecutionMode.PREFILL_DECODE
+                ? Optional.of("devstral has no sequential prefill/decode plan")
+                : Optional.empty();
+    }
+
+    /**
      * The batched prefill runs Llama's tensor-core layers, for Q8_0 weights; the F16 and Q4_K
      * layers have single-token plans only.
      */
