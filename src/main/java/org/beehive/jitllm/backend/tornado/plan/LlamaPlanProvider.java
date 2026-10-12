@@ -60,17 +60,19 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
     }
 
     /**
-     * Llama Q4_0's batched prefill runs its projections in cuBLAS, or on the Metal SIMD-group
-     * kernels: elsewhere, without native libraries there is nothing to build.
+     * Llama Q4_0's batched prefill runs its projections in cuBLAS, through the JIT tensor-core
+     * GEMM on FP16-decoded weights, or on the Metal SIMD-group kernels: elsewhere there is nothing
+     * to build.
      */
     @Override
     public Optional<String> batchPrefillNeeds(Combination c, ExecutionPolicy policy) {
         if (c.weights() == DataType.Q4_0
                 && !BackendId.METAL.equals(c.backend())
+                && !c.tensorCores()
                 && !NativePrefillSupport.nativeProjections(policy)) {
             return Optional.of(
-                    "the llama Q4_0 batched prefill runs its projections through cuBLAS; add"
-                            + " --with-native-libraries on a CUDA device with tensor cores");
+                    "the llama Q4_0 batched prefill needs tensor cores, or cuBLAS through"
+                            + " --with-native-libraries");
         }
         return Optional.empty();
     }

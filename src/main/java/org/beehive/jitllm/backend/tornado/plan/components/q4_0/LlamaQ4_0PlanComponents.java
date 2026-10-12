@@ -9,6 +9,7 @@ import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.llama.LlamaQ4_0LayersBatchPrefill;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_0.LlamaQ4_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_0.decode.LlamaQ4_0FFNLayersDecode;
+import org.beehive.jitllm.backend.tornado.layers.type.q4_0.prefill.LlamaQ4_0LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_0.prefill.LlamaQ4_0LayersBatchPrefillNative;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.LogitsQ8_0Layer;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.decode.LogitsQ8_0LayerDecode;
@@ -77,7 +78,7 @@ public class LlamaQ4_0PlanComponents
     public ActivationTaskGraph batchPrefillActivation(int batchSize) {
         // Metal: the host decodes the Q4_0 embeddings into the FP32 batch carrier for the
         // SIMD-group layers. CUDA: the embedding is Q8_0 (materialized from Q4_0 or Q6_K),
-        // decoded on the device for the cuBLAS layers.
+        // decoded on the device for the cuBLAS and tensor-core layers.
         return BatchPrefillGemmPolicy.simdgroup()
                 ? new BatchPrefillActivation(state, config, batchSize, true)
                 : new BatchPrefillQ8DeviceActivation(state, config, batchSize);
@@ -124,9 +125,14 @@ public class LlamaQ4_0PlanComponents
     public BatchPrefillTransformerLayerTaskGraphs batchPrefillTransformerLayers(
             int batchSize, int firstLayer, int endLayer) {
         if (!NativePrefillSupport.nativeProjections(state.executionPolicy())) {
+            // Without cuBLAS: the projections decoded to FP16 for the JIT tensor-core GEMM, which
+            // builds the whole model in one plan.
+            if (firstLayer == 0 && endLayer == config.numberOfLayers()) {
+                return new LlamaQ4_0LayersBatchPrefillMMA(state, weights, config, batchSize);
+            }
             throw new UnsupportedOperationException(
-                    "the Llama Q4_0 batched prefill runs its projections through cuBLAS: add"
-                            + " --with-native-libraries on a CUDA device with tensor cores");
+                    "the Llama Q4_0 batched prefill of a pipeline stage runs its projections"
+                            + " through cuBLAS: add --with-native-libraries");
         }
         return new LlamaQ4_0LayersBatchPrefillNative(
                 state, weights, config, batchSize, firstLayer, endLayer);

@@ -14,7 +14,7 @@ import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 
-/** The Q4_K and Q6_K to FP16 decodes on the device against the host decode, element by element. */
+/** The Q4_K, Q6_K and packed Q4_0 to FP16 decodes on the device against the host decode, element by element. */
 public class KQuantDequantFP16AccelTest {
 
     private static final int BLOCKS = 8;
@@ -103,6 +103,50 @@ public class KQuantDequantFP16AccelTest {
                     new HalfFloat(expected).getFloat32(),
                     out.get(i).getFloat32(),
                     0f);
+        }
+    }
+
+    @Test
+    public void packedQ4_0MatchesHost() {
+        int rows = 256;
+        int cols = 128;
+        byte[] raw = new byte[rows * (cols / 32) * 18];
+        new Random(3).nextBytes(raw);
+        for (int b = 0; b < rows * cols / 32; b++) {
+            raw[b * 18] = (byte) (b * 11);
+            raw[b * 18 + 1] = (byte) (0x24 | (b & 1) << 7);
+        }
+        ByteArray w = new ByteArray(raw.length);
+        for (int i = 0; i < raw.length; i++) {
+            w.set(i, raw[i]);
+        }
+        ByteArray packed = ByteArray.fromArray(PackedTilePacker.packQ4_0(w, rows, cols));
+        int n = rows * cols;
+        HalfFloatArray out = new HalfFloatArray(n);
+        KernelContext context = new KernelContext();
+        TaskGraph graph =
+                new TaskGraph("q4p")
+                        .transferToDevice(DataTransferMode.FIRST_EXECUTION, packed, out)
+                        .task(
+                                "decode",
+                                TransformerComputeKernelsQ4_0::dequantizeQ4_0PackedToFP16,
+                                context,
+                                packed,
+                                out,
+                                0,
+                                n,
+                                cols)
+                        .transferToHost(DataTransferMode.EVERY_EXECUTION, out);
+        WorkerGrid1D grid = new WorkerGrid1D(n);
+        grid.setLocalWork(256, 1, 1);
+        try (TornadoExecutionPlan plan = new TornadoExecutionPlan(graph.snapshot())) {
+            plan.withGridScheduler(new GridScheduler("q4p.decode", grid)).execute();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        for (int i = 0; i < n; i++) {
+            float expected = TransformerComputeKernelsQ4_0.decode(w, (i / 32) * 18, i % 32);
+            assertEquals("element " + i, new HalfFloat(expected).getFloat32(), out.get(i).getFloat32(), 0f);
         }
     }
 }

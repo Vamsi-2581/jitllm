@@ -176,8 +176,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         }
 
         // Per-layer weights: upload once
-        batchPrefillLayer.transferToDevice(
-                DataTransferMode.FIRST_EXECUTION, layerWeights(layerIndex));
+        uploadLayerWeights(batchPrefillLayer, layerIndex);
         Object[] extraWeights = extraLayerWeights(layerIndex);
         if (extraWeights.length > 0) {
             batchPrefillLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, extraWeights);
@@ -351,6 +350,12 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     }
 
     // @formatter:on
+
+    /** Uploads {@link #layerWeights} to the layer graph once. */
+    protected void uploadLayerWeights(TaskGraph batchPrefillLayer, int layerIndex) {
+        batchPrefillLayer.transferToDevice(
+                DataTransferMode.FIRST_EXECUTION, layerWeights(layerIndex));
+    }
 
     /** The per-layer weights this layer's tasks read, uploaded once. */
     protected Object[] layerWeights(int layerIndex) {
