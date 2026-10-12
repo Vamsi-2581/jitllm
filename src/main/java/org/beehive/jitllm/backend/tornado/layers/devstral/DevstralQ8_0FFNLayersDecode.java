@@ -1,6 +1,6 @@
-package org.beehive.jitllm.backend.tornado.layers.type.fp16.decode;
+package org.beehive.jitllm.backend.tornado.layers.devstral;
 
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.DevstralFP16FFNLayers;
+import org.beehive.jitllm.backend.tornado.layers.type.q8_0.DevstralQ8_0FFNLayers;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
@@ -14,9 +14,9 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
  * and each layer's weights read from the {@code batchPrefillLayer_<i>} graph that already uploaded
  * them.
  */
-public class DevstralFP16FFNLayersDecode extends DevstralFP16FFNLayers {
+public class DevstralQ8_0FFNLayersDecode extends DevstralQ8_0FFNLayers {
 
-    public DevstralFP16FFNLayersDecode(
+    public DevstralQ8_0FFNLayersDecode(
             String taskGraph,
             State state,
             LlamaTornadoWeights weights,
@@ -53,10 +53,9 @@ public class DevstralFP16FFNLayersDecode extends DevstralFP16FFNLayers {
                     state.workspace.wrapV,
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
-                    state.workspace.wrapXbFP16,
                     weights.freq_cis_realFlat.asFloatArray(),
                     weights.freq_cis_imagFlat.asFloatArray());
-            layer.consumeFromDevice("decodeActivation", keyCache(), valueCache());
+            layer.consumeFromDevice("decodeActivation", keyCache(), state.workspace.wrapValueCache);
             layer.consumeFromDevice("decodeActivation", state.workspace.wrapBlockTable);
         } else {
             String pred = "layer_" + (layerIndex - 1);
@@ -72,7 +71,6 @@ public class DevstralFP16FFNLayersDecode extends DevstralFP16FFNLayers {
                     valueCache(),
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
-                    state.workspace.wrapXbFP16,
                     state.workspace.positionHolder,
                     weights.freq_cis_realFlat.asFloatArray(),
                     weights.freq_cis_imagFlat.asFloatArray());

@@ -11,7 +11,7 @@ import org.beehive.jitllm.backend.tornado.layers.type.q8_0.Qwen2MoEQ8_0FFNLayers
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.decode.LogitsQ8_0LayerDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.decode.Qwen2MoEQ8_0FFNLayersDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill.Qwen2MoEQ8_0LayersBatchPrefill;
-import org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill.Qwen2MoEQ8_0LayersBatchPrefillMMA;
+import org.beehive.jitllm.backend.tornado.layers.qwen2moe.Qwen2MoEQ8_0LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.plan.components.BatchPrefillDecodeForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchDecodeActivation;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchPrefillActivation;

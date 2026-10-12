@@ -1,4 +1,4 @@
-package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
+package org.beehive.jitllm.backend.tornado.layers.qwen2moe;
 
 import org.beehive.jitllm.backend.tornado.kernels.Int8GemmKernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen2MoEBatchKernels;

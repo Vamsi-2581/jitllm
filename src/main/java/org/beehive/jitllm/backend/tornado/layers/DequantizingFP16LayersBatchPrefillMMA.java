@@ -1,4 +1,6 @@
-package org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill;
+package org.beehive.jitllm.backend.tornado.layers;
+
+import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
 
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;

@@ -1,7 +1,7 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q4_0.prefill;
 
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsQ4_0;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.DequantizingFP16LayersBatchPrefillMMA;
+import org.beehive.jitllm.backend.tornado.layers.DequantizingFP16LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
