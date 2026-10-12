@@ -10,9 +10,9 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 
 /**
  * The decode half of Devstral's batched prefill/decode plan: Devstral's single-token layers, with
- * the key/value cache and block table relayed by {@code decodeActivation} from the batched
- * prefill, and each layer's weights read from the {@code batchPrefillLayer_<i>} graph that already
- * uploaded them.
+ * the key/value cache and block table relayed by {@code decodeActivation} from the batched prefill,
+ * and each layer's weights read from the {@code batchPrefillLayer_<i>} graph that already uploaded
+ * them.
  */
 public class DevstralQ4_KFFNLayersDecode extends DevstralQ4_KFFNLayers {
 
@@ -56,8 +56,7 @@ public class DevstralQ4_KFFNLayersDecode extends DevstralQ4_KFFNLayers {
                     state.workspace.wrapHb2,
                     weights.freq_cis_realFlat.asFloatArray(),
                     weights.freq_cis_imagFlat.asFloatArray());
-            layer.consumeFromDevice(
-                    "decodeActivation", keyCache(), valueCache());
+            layer.consumeFromDevice("decodeActivation", keyCache(), valueCache());
             layer.consumeFromDevice("decodeActivation", state.workspace.wrapBlockTable);
         } else {
             String pred = "layer_" + (layerIndex - 1);

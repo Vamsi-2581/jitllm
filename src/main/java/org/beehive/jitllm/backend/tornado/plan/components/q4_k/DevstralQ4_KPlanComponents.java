@@ -5,11 +5,11 @@ import org.beehive.jitllm.backend.tornado.layers.Activation;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.layers.type.q4_k.DevstralQ4_KFFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_k.decode.DevstralQ4_KFFNLayersDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.q4_k.prefill.DevstralQ4_KLayersBatchPrefillMMA;
-import org.beehive.jitllm.backend.tornado.layers.type.q8_0.decode.LogitsQ8_0LayerDecode;
-import org.beehive.jitllm.backend.tornado.layers.type.q4_k.DevstralQ4_KFFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.LogitsQ8_0Layer;
+import org.beehive.jitllm.backend.tornado.layers.type.q8_0.decode.LogitsQ8_0LayerDecode;
 import org.beehive.jitllm.backend.tornado.plan.components.BatchPrefillDecodeForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchDecodeActivation;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchPrefillActivation;
@@ -85,7 +85,8 @@ public class DevstralQ4_KPlanComponents implements BatchPrefillDecodeForwardPlan
 
     @Override
     public AbstractLogitsTaskGraph decodeLogits(String previousGraphId) {
-        return new LogitsQ8_0LayerDecode("logits", state, weights, config, previousGraphId, schedulerType);
+        return new LogitsQ8_0LayerDecode(
+                "logits", state, weights, config, previousGraphId, schedulerType);
     }
 
     /** Devstral has no sequential prefill/decode plan; its provider refuses the mode. */

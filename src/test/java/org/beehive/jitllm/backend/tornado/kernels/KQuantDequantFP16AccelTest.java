@@ -48,9 +48,23 @@ public class KQuantDequantFP16AccelTest {
                         .transferToDevice(DataTransferMode.FIRST_EXECUTION, w)
                         .transferToDevice(DataTransferMode.FIRST_EXECUTION, out);
         if (q4k) {
-            graph.task("decode", TransformerComputeKernelsQ4_K::dequantizeQ4_KToFP16, context, w, out, 0, N);
+            graph.task(
+                    "decode",
+                    TransformerComputeKernelsQ4_K::dequantizeQ4_KToFP16,
+                    context,
+                    w,
+                    out,
+                    0,
+                    N);
         } else {
-            graph.task("decode", TransformerComputeKernelsQ6_K::dequantizeQ6_KToFP16, context, w, out, 0, N);
+            graph.task(
+                    "decode",
+                    TransformerComputeKernelsQ6_K::dequantizeQ6_KToFP16,
+                    context,
+                    w,
+                    out,
+                    0,
+                    N);
         }
         graph.transferToHost(DataTransferMode.EVERY_EXECUTION, out);
         WorkerGrid1D grid = new WorkerGrid1D(N);
@@ -64,14 +78,17 @@ public class KQuantDequantFP16AccelTest {
         return out;
     }
 
-
     @Test
     public void q4kMatchesHost() {
         ByteArray w = randomBlocks(144, 0, 1);
         HalfFloatArray out = run("q4k", w, true);
         for (int i = 0; i < N; i++) {
             float expected = TransformerComputeKernelsQ4_K.decode(w, (i / 256) * 144, i % 256);
-            assertEquals("element " + i, new HalfFloat(expected).getFloat32(), out.get(i).getFloat32(), 0f);
+            assertEquals(
+                    "element " + i,
+                    new HalfFloat(expected).getFloat32(),
+                    out.get(i).getFloat32(),
+                    0f);
         }
     }
 
@@ -81,7 +98,11 @@ public class KQuantDequantFP16AccelTest {
         HalfFloatArray out = run("q6k", w, false);
         for (int i = 0; i < N; i++) {
             float expected = TransformerComputeKernelsQ6_K.decode(w, (i / 256) * 210, i % 256);
-            assertEquals("element " + i, new HalfFloat(expected).getFloat32(), out.get(i).getFloat32(), 0f);
+            assertEquals(
+                    "element " + i,
+                    new HalfFloat(expected).getFloat32(),
+                    out.get(i).getFloat32(),
+                    0f);
         }
     }
 }

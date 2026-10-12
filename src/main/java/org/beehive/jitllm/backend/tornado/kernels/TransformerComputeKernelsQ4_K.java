@@ -1,11 +1,11 @@
 package org.beehive.jitllm.backend.tornado.kernels;
 
-import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
-import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.math.TornadoMath;
+import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 import uk.ac.manchester.tornado.api.utils.QuantizationUtils;
 
@@ -106,7 +106,11 @@ public final class TransformerComputeKernelsQ4_K {
             int highNibble = posInPair / 32;
             int subBlock = pairIndex * 2 + highNibble;
             int qByte =
-                    w.get(blockByteOffset + QS_OFFSET + pairIndex * 32 + (posInPair - highNibble * 32))
+                    w.get(
+                                    blockByteOffset
+                                            + QS_OFFSET
+                                            + pairIndex * 32
+                                            + (posInPair - highNibble * 32))
                             & 0xFF;
             int q = (qByte >> (highNibble * 4)) & 0xF;
             // Sub-blocks 0-3 read bytes [j] and [j+4]; 4-7 read [j+4], [j-4] and [j]. Reading all

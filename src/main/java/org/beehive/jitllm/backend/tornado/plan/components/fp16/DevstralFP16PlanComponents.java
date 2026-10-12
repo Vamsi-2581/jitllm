@@ -5,11 +5,11 @@ import org.beehive.jitllm.backend.tornado.layers.Activation;
 import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.DevstralFP16FFNLayersDecode;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.LogitsFP16LayerDecode;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.DevstralFP16FFNLayers;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.LogitsFP16Layer;
+import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.DevstralFP16FFNLayersDecode;
+import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.LogitsFP16LayerDecode;
+import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.plan.components.BatchPrefillDecodeForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchDecodeActivation;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchPrefillActivation;
@@ -58,7 +58,9 @@ public class DevstralFP16PlanComponents implements BatchPrefillDecodeForwardPlan
         return new LlamaFP16LayersBatchPrefillMMA(state, weights, config, batchSize);
     }
 
-    /** An F16 embedding: copied by the host into the FP16 staging buffer, converted on the device. */
+    /**
+     * An F16 embedding: copied by the host into the FP16 staging buffer, converted on the device.
+     */
     @Override
     public ActivationTaskGraph batchPrefillActivation(int batchSize) {
         boolean f16Embedding =
@@ -82,7 +84,8 @@ public class DevstralFP16PlanComponents implements BatchPrefillDecodeForwardPlan
 
     @Override
     public AbstractLogitsTaskGraph decodeLogits(String previousGraphId) {
-        return new LogitsFP16LayerDecode("logits", state, weights, config, previousGraphId, schedulerType);
+        return new LogitsFP16LayerDecode(
+                "logits", state, weights, config, previousGraphId, schedulerType);
     }
 
     /** Devstral has no sequential prefill/decode plan; its provider refuses the mode. */

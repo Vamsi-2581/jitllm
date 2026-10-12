@@ -446,14 +446,13 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         // W1 and W3 in ONE tensor-core launch → packed [gate|up] rows.
         gateUpProjection(batchPrefillLayer, layerIndex);
 
-        batchPrefillLayer
-                .task(
-                        "swiglu",
-                        TransformerBatchPrefillKernels::batchedFFNSwiGLUFP16Packed,
-                        context,
-                        state.workspace.wrapHbFP16Batch,
-                        state.workspace.gateUpResultBatch,
-                        hidDim);
+        batchPrefillLayer.task(
+                "swiglu",
+                TransformerBatchPrefillKernels::batchedFFNSwiGLUFP16Packed,
+                context,
+                state.workspace.wrapHbFP16Batch,
+                state.workspace.gateUpResultBatch,
+                hidDim);
         downProjection(batchPrefillLayer, layerIndex);
         afterDownProjection(batchPrefillLayer, layerIndex);
         batchPrefillLayer.task(
@@ -479,7 +478,9 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         scheduler.addWorkerGrid(p + "w2Resid", elementwiseGrid(batchSize * dim));
     }
 
-    /** The attention output projection: {@code attnOutFP16} through {@code wo} into {@code woOut}. */
+    /**
+     * The attention output projection: {@code attnOutFP16} through {@code wo} into {@code woOut}.
+     */
     protected void attentionOutputProjection(TaskGraph batchPrefillLayer, int layerIndex) {
         batchPrefillLayer.task(
                 "woProj",

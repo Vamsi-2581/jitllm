@@ -119,7 +119,12 @@ public class DevstralQ4_KLayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefi
         int dim = config.dim();
         int kvDim = config.kvDim();
         decode(batchPrefillLayer, "qDecode", weights.wqLayered[layerIndex], 0, qDim() * dim);
-        decode(batchPrefillLayer, "kDecode", weights.wkLayered[layerIndex], qDim() * dim, kvDim * dim);
+        decode(
+                batchPrefillLayer,
+                "kDecode",
+                weights.wkLayered[layerIndex],
+                qDim() * dim,
+                kvDim * dim);
         decode(
                 batchPrefillLayer,
                 "vDecode",

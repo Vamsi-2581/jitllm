@@ -262,7 +262,9 @@ public class DevstralQ4_KFFNLayers
 
     /** The value cache in the representation the state holds. */
     protected Object valueCache() {
-        return useFp16KVCache() ? state.workspace.wrapValueCacheFP16 : state.workspace.wrapValueCache;
+        return useFp16KVCache()
+                ? state.workspace.wrapValueCacheFP16
+                : state.workspace.wrapValueCache;
     }
 
     /** The graph whose {@code wrapX} this layer reads, or {@code null} for the unnamed consume. */
