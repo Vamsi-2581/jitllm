@@ -635,11 +635,11 @@ public final class Qwen35MMAKernels {
 
     // @formatter:off
     /**
-     * A {@code Q8_0} matrix of {@code n} elements ({@code n / k} rows by {@code k}) decoded into the
-     * tile order {@link #gemmMMATiledB} reads (the layout of {@link
+     * A {@code Q8_0} matrix of {@code n} elements ({@code n / k} rows by {@code k}) decoded into
+     * the tile order {@link #gemmMMATiledB} reads (the layout of {@link
      * #dequantizeQ4_0ToFP16TiledPairs}), at half {@code destOffset} of {@code out}: lane {@code h}
-     * writes half position {@code h} from its row and k. Skipped once {@code done[flag]} is set, for
-     * a decoded copy that outlives the chunk.
+     * writes half position {@code h} from its row and k. Skipped once {@code done[flag]} is set,
+     * for a decoded copy that outlives the chunk.
      *
      * <p>A matrix stacked under others starts at a whole 128-row block, so {@code destOffset} is
      * its first row times {@code k} and its tiles follow theirs. Requires {@code n / k % 128 == 0}
@@ -668,7 +668,8 @@ public final class Qwen35MMAKernels {
                 int off = (row * blocksPerRow + (kk >>> 5)) * 34;
                 out.set(
                         destOffset + h,
-                        new HalfFloat(w.getHalfFloat(off).getFloat32() * w.get(off + 2 + (kk & 31))));
+                        new HalfFloat(
+                                w.getHalfFloat(off).getFloat32() * w.get(off + 2 + (kk & 31))));
             }
         }
     }

@@ -2,15 +2,15 @@ package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
 
 import java.util.List;
 import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
-import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
 import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
+import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
@@ -124,7 +124,8 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 Math.max(
                         Math.max((qDim + 2L * kvDim) * dim, 2L * config.hiddenDim() * dim),
                         Math.max(dim * qDim, dim * config.hiddenDim()));
-        this.projections = new FP16Projections(
+        this.projections =
+                new FP16Projections(
                         context,
                         widest,
                         paddedBatch,
@@ -418,14 +419,13 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 weights.w1Layered[layerIndex],
                 weights.w3Layered[layerIndex]);
 
-        batchPrefillLayer
-                .task(
-                        "swiglu",
-                        TransformerBatchPrefillKernels::batchedFFNSwiGLUFP16Packed,
-                        context,
-                        state.workspace.wrapHbFP16Batch,
-                        state.workspace.gateUpResultBatch,
-                        hidDim);
+        batchPrefillLayer.task(
+                "swiglu",
+                TransformerBatchPrefillKernels::batchedFFNSwiGLUFP16Packed,
+                context,
+                state.workspace.wrapHbFP16Batch,
+                state.workspace.gateUpResultBatch,
+                hidDim);
         projections.project(
                 batchPrefillLayer,
                 "w2Proj",
@@ -434,13 +434,12 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 paddedBatch,
                 hidDim,
                 weights.w2Layered[layerIndex]);
-        batchPrefillLayer
-                .task(
-                        "w2Resid",
-                        TransformerBatchPrefillKernels::batchedResidualAddFP32,
-                        context,
-                        state.workspace.wrapXBatch,
-                        state.workspace.w2Out);
+        batchPrefillLayer.task(
+                "w2Resid",
+                TransformerBatchPrefillKernels::batchedResidualAddFP32,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.w2Out);
 
         batchPrefillLayer.persistOnDevice(state.workspace.wrapXBatch, keyCache(), valueCache());
 

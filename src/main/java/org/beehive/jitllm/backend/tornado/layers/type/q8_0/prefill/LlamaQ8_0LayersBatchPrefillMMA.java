@@ -2,11 +2,11 @@ package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
 
 import java.util.List;
 import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
-import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
 import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
@@ -98,8 +98,7 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         }
         int qDim = config.numberOfHeads() * config.headSize();
         this.tcAttention =
-                TensorCoreBatchAttention.applies(
-                                useFp16KVCache(), paddedBatch, config.headSize())
+                TensorCoreBatchAttention.applies(useFp16KVCache(), paddedBatch, config.headSize())
                         ? new TensorCoreBatchAttention(
                                 state,
                                 qDim,
@@ -115,7 +114,8 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 Math.max(
                         Math.max((qDim + 2L * config.kvDim()) * dim, 2L * config.hiddenDim() * dim),
                         Math.max(dim * qDim, dim * config.hiddenDim()));
-        this.projections = new FP16Projections(
+        this.projections =
+                new FP16Projections(
                         context,
                         widest,
                         paddedBatch,
@@ -123,7 +123,9 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         FP16Projections.resident(
                                 config.numberOfLayers()
                                         * dim
-                                        * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim())),
+                                        * (2L * qDim
+                                                + 2L * config.kvDim()
+                                                + 3L * config.hiddenDim())),
                         4 * config.numberOfLayers(),
                         NativePrefillSupport.nativeProjections(state.executionPolicy()));
         this.layerITGs =

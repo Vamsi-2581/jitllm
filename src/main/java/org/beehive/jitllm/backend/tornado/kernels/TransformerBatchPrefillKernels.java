@@ -2168,7 +2168,8 @@ public final class TransformerBatchPrefillKernels {
                 int off = (i >>> 5) * 34;
                 out.set(
                         destOffset + i,
-                        new HalfFloat(w.getHalfFloat(off).getFloat32() * w.get(off + 2 + (i & 31))));
+                        new HalfFloat(
+                                w.getHalfFloat(off).getFloat32() * w.get(off + 2 + (i & 31))));
             }
         }
     }

@@ -315,9 +315,7 @@ public class Qwen3FP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 "[jitllm] prefill acceleration: %s%n",
                 NativePrefillSupport.describe(state.executionPolicy(), fp16Kv, sdpaShape));
         this.tcAttention =
-                !cudnnAttention
-                                && TensorCoreBatchAttention.applies(
-                                        fp16Kv, paddedBatch, nEmbdHead)
+                !cudnnAttention && TensorCoreBatchAttention.applies(fp16Kv, paddedBatch, nEmbdHead)
                         ? new TensorCoreBatchAttention(
                                 state,
                                 qDim,

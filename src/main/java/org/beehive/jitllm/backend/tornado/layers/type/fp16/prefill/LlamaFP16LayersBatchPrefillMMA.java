@@ -2,11 +2,11 @@ package org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill;
 
 import java.util.List;
 import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
-import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
 import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.SplitKGemm;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
@@ -23,8 +23,8 @@ import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.WorkerGrid1D;
 import uk.ac.manchester.tornado.api.WorkerGrid2D;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 
 /**
  * Batched-prefill transformer-layer TaskGraphs for the unified batched prefill-decode plan ({@link
@@ -115,8 +115,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         }
         int qDim = config.numberOfHeads() * config.headSize();
         this.tcAttention =
-                TensorCoreBatchAttention.applies(
-                                useFp16KVCache(), paddedBatch, config.headSize())
+                TensorCoreBatchAttention.applies(useFp16KVCache(), paddedBatch, config.headSize())
                         ? new TensorCoreBatchAttention(
                                 state,
                                 qDim,
@@ -134,8 +133,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         config.dim(),
                         NativePrefillSupport.nativeProjections(state.executionPolicy()));
         long dimL = config.dim();
-        long layerWeights =
-                dimL * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim());
+        long layerWeights = dimL * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim());
         this.stacked =
                 splitK.nativeGemm()
                         ? new FP16Projections(
@@ -191,8 +189,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.woOut,
                     state.workspace.wrapHbFP16Batch,
                     state.workspace.w2Out);
-            batchPrefillLayer.transferToDevice(
-                    DataTransferMode.FIRST_EXECUTION, splitK.partial());
+            batchPrefillLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, splitK.partial());
             if (stacked != null) {
                 batchPrefillLayer.transferToDevice(
                         DataTransferMode.FIRST_EXECUTION, stacked.buffers());
@@ -329,28 +326,28 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             if (tcAttention != null) {
                 tcAttention.appendTasks(batchPrefillLayer, context, layerIndex);
             } else {
-            batchPrefillLayer.task(
-                    "batch_attention",
-                    packedHalf2Attention
-                            ? TransformerPagedKvBatchPrefillKernels
-                                    ::batchedFlashAttentionFP16OutKVFP16PackedTilePaged
-                            : TransformerPagedKvBatchPrefillKernels
-                                    ::batchedFlashAttentionFP16OutKVFP16Paged,
-                    context,
-                    state.workspace.batchStartPosHolder,
-                    state.workspace.qkvResultBatch,
-                    state.workspace.wrapKeyCacheFP16,
-                    state.workspace.wrapValueCacheFP16,
-                    state.workspace.attnOutFP16,
-                    config.numberOfHeads(),
-                    config.headSize(),
-                    kvDim,
-                    config.kvMul(),
-                    layerIndex,
-                    state.workspace.wrapBlockTable,
-                    state.kvBlockCfg,
-                    state.kvBlockStride,
-                    qDim);
+                batchPrefillLayer.task(
+                        "batch_attention",
+                        packedHalf2Attention
+                                ? TransformerPagedKvBatchPrefillKernels
+                                        ::batchedFlashAttentionFP16OutKVFP16PackedTilePaged
+                                : TransformerPagedKvBatchPrefillKernels
+                                        ::batchedFlashAttentionFP16OutKVFP16Paged,
+                        context,
+                        state.workspace.batchStartPosHolder,
+                        state.workspace.qkvResultBatch,
+                        state.workspace.wrapKeyCacheFP16,
+                        state.workspace.wrapValueCacheFP16,
+                        state.workspace.attnOutFP16,
+                        config.numberOfHeads(),
+                        config.headSize(),
+                        kvDim,
+                        config.kvMul(),
+                        layerIndex,
+                        state.workspace.wrapBlockTable,
+                        state.kvBlockCfg,
+                        state.kvBlockStride,
+                        qDim);
             }
         } else {
             if (splitHalfRope()) {
@@ -613,8 +610,8 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
 
     /**
      * {@code c[m][n] = a[m][k] . b[n][k]^T} on the tensor cores as task {@code task}, its depth
-     * split when the output is too narrow to fill the device. The caller registers the unsplit
-     * grid under {@code task}.
+     * split when the output is too narrow to fill the device. The caller registers the unsplit grid
+     * under {@code task}.
      */
     protected void projectFP16(
             TaskGraph layer,

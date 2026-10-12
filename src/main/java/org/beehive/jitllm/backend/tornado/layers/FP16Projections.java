@@ -87,8 +87,8 @@ public final class FP16Projections {
     /**
      * {@code c[m][N] = a[m][k] . [W_0 | W_1 | ...]^T} as task {@code task}: each Q8_0 weight
      * ({@code [N_i][k]}, row-major) decoded into the scratch after the one before it, then one FP16
-     * GEMM over their rows, so the output columns are the weights' rows in order. The GEMM's grid is
-     * the caller's, under {@code task}; {@link #addGrids} registers the decode tasks'.
+     * GEMM over their rows, so the output columns are the weights' rows in order. The GEMM's grid
+     * is the caller's, under {@code task}; {@link #addGrids} registers the decode tasks'.
      */
     // @formatter:on
     public void project(
@@ -241,7 +241,8 @@ public final class FP16Projections {
                 (name, n) ->
                         scheduler.addWorkerGrid(
                                 name, WorkerGridFactory.genericWorker((n + 255) / 256 * 256, 256)));
-        markTasks.forEach(name -> scheduler.addWorkerGrid(name, WorkerGridFactory.genericWorker(1, 1)));
+        markTasks.forEach(
+                name -> scheduler.addWorkerGrid(name, WorkerGridFactory.genericWorker(1, 1)));
         gemm.addGrids(scheduler);
     }
 }

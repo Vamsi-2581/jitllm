@@ -29,8 +29,9 @@ import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
  *
  * <p>The GEMM tiles columns 128 at a time. A head 128 wide (or a multiple) writes its values
  * straight into the output; any other width (64, 96) is computed rounded up to the next 128 into a
- * scratch with that many columns per head and narrowed on the way to FP16. The extra columns read the next
- * key/value head's rows, so the transposed values carry that much zero padding past the last head.
+ * scratch with that many columns per head and narrowed on the way to FP16. The extra columns read
+ * the next key/value head's rows, so the transposed values carry that much zero padding past the
+ * last head.
  */
 // @formatter:on
 public final class TensorCoreBatchAttention {

@@ -18,9 +18,9 @@ import uk.ac.manchester.tornado.cublas.CuBlas;
  * The FP16 tensor-core GEMM of a batched prefill, with its depth split when the output is too
  * narrow to fill the device.
  *
- * <p>{@link TransformerBatchPrefillKernels#gemmMMA} gives one thread block per 128x128 output
- * tile. A projection into the model width at a chunk of 512 has 64 of them on a device of over a
- * hundred multiprocessors, so below {@link #MIN_BLOCKS} tiles the depth is cut into up to {@link
+ * <p>{@link TransformerBatchPrefillKernels#gemmMMA} gives one thread block per 128x128 output tile.
+ * A projection into the model width at a chunk of 512 has 64 of them on a device of over a hundred
+ * multiprocessors, so below {@link #MIN_BLOCKS} tiles the depth is cut into up to {@link
  * #MAX_SLICES} slices ({@link Gemma4BatchPrefillKernels#gemmMMASplitK}) whose partial products
  * {@link Gemma4BatchPrefillKernels#splitKReduce} then sums.
  *
@@ -67,7 +67,10 @@ public final class SplitKGemm {
 
     /** The depth slices for an {@code m x n} output over depth {@code k}: 1 for no split. */
     int slices(int m, int n, int k) {
-        if (nativeGemm || !ENABLED || m % 128 != 0 || (long) m * n * MAX_SLICES > partial.getSize()) {
+        if (nativeGemm
+                || !ENABLED
+                || m % 128 != 0
+                || (long) m * n * MAX_SLICES > partial.getSize()) {
             return 1;
         }
         int blocks = (m / 128) * (n / 128);
@@ -79,8 +82,8 @@ public final class SplitKGemm {
     }
 
     /**
-     * {@code c[m][n] = a[m][k] . b[n][k]^T} as task {@code task}. Unsplit, the grid is the caller's;
-     * split, {@link #addGrids} registers it and the reduce task's.
+     * {@code c[m][n] = a[m][k] . b[n][k]^T} as task {@code task}. Unsplit, the grid is the
+     * caller's; split, {@link #addGrids} registers it and the reduce task's.
      */
     public void gemm(
             TaskGraph layer,
@@ -93,7 +96,21 @@ public final class SplitKGemm {
             int k) {
         if (nativeGemm) {
             layer.libraryTask(
-                    task, CuBlas::cublasGemmExFP16FP32, 1, 0, n, m, k, 1.0f, b, k, a, k, 0.0f, c, n);
+                    task,
+                    CuBlas::cublasGemmExFP16FP32,
+                    1,
+                    0,
+                    n,
+                    m,
+                    k,
+                    1.0f,
+                    b,
+                    k,
+                    a,
+                    k,
+                    0.0f,
+                    c,
+                    n);
             return;
         }
         int s = slices(m, n, k);
@@ -102,16 +119,7 @@ public final class SplitKGemm {
             return;
         }
         layer.task(
-                task,
-                Gemma4BatchPrefillKernels::gemmMMASplitK,
-                context,
-                a,
-                b,
-                partial,
-                m,
-                n,
-                k,
-                s);
+                task, Gemma4BatchPrefillKernels::gemmMMASplitK, context, a, b, partial, m, n, k, s);
         layer.task(
                 task + "Reduce",
                 Gemma4BatchPrefillKernels::splitKReduce,
