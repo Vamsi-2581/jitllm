@@ -123,9 +123,14 @@ public final class TensorCoreBatchAttention {
      */
     // @formatter:on
     public void appendTasks(TaskGraph layer, KernelContext context, int kvLayer) {
+        appendTasks(layer, context, kvLayer, "");
+    }
+
+    /** {@link #appendTasks(TaskGraph, KernelContext, int)} with task ids prefixed by {@code tp}. */
+    public void appendTasks(TaskGraph layer, KernelContext context, int kvLayer, String tp) {
         int qkvStride = qDim + 2 * kvDim;
         layer.task(
-                "attn_gather",
+                tp + "attn_gather",
                 TensorCoreAttentionKernels::gatherPagedKeyValues,
                 context,
                 state.workspace.batchStartPosHolder,
@@ -141,7 +146,7 @@ public final class TensorCoreBatchAttention {
                 state.kvBlockStride,
                 paddedPositions);
         layer.task(
-                "attn_q16",
+                tp + "attn_q16",
                 TensorCoreAttentionKernels::queriesToHalf,
                 context,
                 state.workspace.qkvResultBatch,
@@ -154,7 +159,7 @@ public final class TensorCoreBatchAttention {
         for (int pass = 0; pass * hp < heads; pass++) {
             int z0 = pass * hp;
             layer.task(
-                    "attn_scores_" + pass,
+                    tp + "attn_scores_" + pass,
                     BatchMmaKernels::gemmMMAStrided,
                     context,
                     queries,
@@ -177,7 +182,7 @@ public final class TensorCoreBatchAttention {
                     kvMul,
                     0);
             layer.task(
-                    "attn_softmax_" + pass,
+                    tp + "attn_softmax_" + pass,
                     BatchMmaKernels::causalSoftmax,
                     context,
                     state.workspace.batchStartPosHolder,
@@ -187,7 +192,7 @@ public final class TensorCoreBatchAttention {
                     paddedPositions,
                     (float) (1.0 / Math.sqrt(headSize)));
             layer.task(
-                    "attn_values_" + pass,
+                    tp + "attn_values_" + pass,
                     BatchMmaKernels::gemmMMAStrided,
                     context,
                     probs,
@@ -212,7 +217,7 @@ public final class TensorCoreBatchAttention {
         }
         if (narrow) {
             layer.task(
-                    "attn_out16",
+                    tp + "attn_out16",
                     BatchMmaKernels::narrowHeadsToHalf,
                     context,
                     attn,
@@ -223,7 +228,7 @@ public final class TensorCoreBatchAttention {
                     rows * qDim);
         } else {
             layer.task(
-                    "attn_out16",
+                    tp + "attn_out16",
                     BatchMmaKernels::toHalf,
                     context,
                     attn,
@@ -234,7 +239,12 @@ public final class TensorCoreBatchAttention {
 
     /** Registers the grids of {@link #appendTasks} for the layer graph named {@code graph}. */
     public void addGrids(GridScheduler scheduler, String graph) {
-        String p = graph + ".";
+        addGrids(scheduler, graph, "");
+    }
+
+    /** {@link #addGrids(GridScheduler, String)} for task ids prefixed by {@code tp}. */
+    public void addGrids(GridScheduler scheduler, String graph, String tp) {
+        String p = graph + "." + tp;
         scheduler.addWorkerGrid(p + "attn_gather", elementwise(paddedPositions * kvDim));
         scheduler.addWorkerGrid(p + "attn_q16", elementwise(rows * qDim));
         int hp = headsPerPass;

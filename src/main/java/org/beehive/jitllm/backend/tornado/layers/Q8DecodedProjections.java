@@ -2,6 +2,7 @@ package org.beehive.jitllm.backend.tornado.layers;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.beehive.jitllm.backend.tornado.kernels.Qwen35MMAKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.PackedWeights;
@@ -23,8 +24,10 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * loop. Decoding once per chunk costs one pass over the weights and runs the GEMM at the FP16 rate.
  * The scratch is the size of the widest projection the caller multiplies.
  *
- * <p>The GEMM is {@link SplitKGemm}'s, which splits the depth of a projection too narrow to fill
- * the device.
+ * <p>A projection wide enough to fill the device is decoded in the tile order {@link
+ * Qwen35MMAKernels#gemmMMATiledB} stages, whose B tiles then arrive by {@code cp.async} from
+ * contiguous words. A narrower one is decoded row-major for {@link SplitKGemm}, which splits its
+ * depth.
  *
  * <p>When the decoded weights of the whole model fit in {@link #RESIDENT_BYTES}, each projection
  * keeps its own FP16 copy instead, decoded on the first chunk only: a small model's decode costs a
@@ -48,6 +51,7 @@ public final class Q8DecodedProjections {
     private final java.util.List<String> markTasks = new java.util.ArrayList<>();
     private final boolean resident;
     private final IntArray decoded;
+    private final int neverDecoded;
     private int nextFlag;
 
     /**
@@ -64,7 +68,9 @@ public final class Q8DecodedProjections {
             int projectionCalls) {
         this.context = context;
         this.resident = resident;
-        this.decoded = new IntArray(Math.max(1, projectionCalls));
+        // One flag per resident projection, and a last one never set for the per-chunk decodes.
+        this.decoded = new IntArray(projectionCalls + 1);
+        this.neverDecoded = projectionCalls;
         this.scratch = new HalfFloatArray(resident ? 1 : Math.toIntExact(widest));
         this.gemm = new SplitKGemm(context, rows, widestSplit);
     }
@@ -100,6 +106,21 @@ public final class Q8DecodedProjections {
             b = new HalfFloatArray(Math.toIntExact(total));
             layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, b);
             flag = nextFlag++;
+        }
+        long total = 0;
+        boolean wholeRowBlocks = k % 32 == 0;
+        for (TornadoTensor w : ws) {
+            if (w.isPacked()) {
+                throw PackedWeights.noPackedKernel("Q8_0 batch-prefill task '" + task + "'");
+            }
+            long elements = w.asByteArray().getSize() / 34 * 32;
+            total += elements;
+            wholeRowBlocks &= (elements / k) % 128 == 0;
+        }
+        int columns = Math.toIntExact(total / k);
+        if (wholeRowBlocks && m % 128 == 0 && gemm.slices(m, columns, k) == 1) {
+            projectTiled(layer, task, a, c, m, k, b, resident ? flag : neverDecoded, ws);
+            return;
         }
         int offset = 0;
         for (int i = 0; i < ws.length; i++) {
@@ -141,6 +162,45 @@ public final class Q8DecodedProjections {
             markTasks.add(layer.getTaskGraphName() + "." + mark);
         }
         gemm.gemm(layer, task, a, b, c, m, offset / k, k);
+    }
+
+    /** The tile-order decodes of {@code ws} into {@code b}, then {@code gemmMMATiledB}. */
+    private void projectTiled(
+            TaskGraph layer,
+            String task,
+            HalfFloatArray a,
+            FloatArray c,
+            int m,
+            int k,
+            HalfFloatArray b,
+            int flag,
+            TornadoTensor... ws) {
+        int offset = 0;
+        for (int i = 0; i < ws.length; i++) {
+            int n = ws[i].asByteArray().getSize() / 34 * 32;
+            String decode = task + "Decode" + i;
+            layer.task(
+                    decode,
+                    Qwen35MMAKernels::dequantizeQ8_0ToFP16Tiled,
+                    context,
+                    ws[i].asByteArray(),
+                    b,
+                    offset,
+                    n,
+                    k,
+                    decoded,
+                    flag);
+            decodeTasks.put(
+                    layer.getTaskGraphName() + "." + decode,
+                    Math.min(n, Qwen35MMAKernels.TILED_DECODE_LANES));
+            offset += n;
+        }
+        if (resident) {
+            String mark = task + "Decoded";
+            layer.task(mark, TransformerBatchPrefillKernels::markDecoded, context, decoded, flag);
+            markTasks.add(layer.getTaskGraphName() + "." + mark);
+        }
+        layer.task(task, Qwen35MMAKernels::gemmMMATiledB, context, a, b, c, m, offset / k, k);
     }
 
     /**

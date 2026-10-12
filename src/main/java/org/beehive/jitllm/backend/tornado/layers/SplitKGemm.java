@@ -31,6 +31,10 @@ public final class SplitKGemm {
 
     static final int MAX_SLICES = 4;
 
+    /** {@code -Djitllm.prefill.splitK=false} keeps every GEMM whole. */
+    private static final boolean ENABLED =
+            !"false".equalsIgnoreCase(System.getProperty("jitllm.prefill.splitK", "true"));
+
     private final KernelContext context;
     private final FloatArray partial;
     private final Map<String, int[]> splitTasks = new LinkedHashMap<>();
@@ -50,8 +54,8 @@ public final class SplitKGemm {
     }
 
     /** The depth slices for an {@code m x n} output over depth {@code k}: 1 for no split. */
-    private int slices(int m, int n, int k) {
-        if (m % 128 != 0 || (long) m * n * MAX_SLICES > partial.getSize()) {
+    int slices(int m, int n, int k) {
+        if (!ENABLED || m % 128 != 0 || (long) m * n * MAX_SLICES > partial.getSize()) {
             return 1;
         }
         int blocks = (m / 128) * (n / 128);
