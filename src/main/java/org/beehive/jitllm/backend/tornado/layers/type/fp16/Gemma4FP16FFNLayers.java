@@ -700,10 +700,7 @@ public class Gemma4FP16FFNLayers
                         "batchPrefillLayer_" + firstLayerOfKind(false),
                         weights.freqCisRealFull.asFloatArray(),
                         weights.freqCisImagFull.asFloatArray());
-                unifiedLayer.consumeFromDevice(
-                        "decodeActivation",
-                        keyCache(),
-                        valueCache());
+                unifiedLayer.consumeFromDevice("decodeActivation", keyCache(), valueCache());
             } else {
                 unifiedLayer.transferToDevice(
                         DataTransferMode.FIRST_EXECUTION,
@@ -713,9 +710,7 @@ public class Gemma4FP16FFNLayers
                         weights.freqCisRealFull.asFloatArray(),
                         weights.freqCisImagFull.asFloatArray());
                 unifiedLayer.transferToDevice(
-                        DataTransferMode.FIRST_EXECUTION,
-                        keyCache(),
-                        valueCache());
+                        DataTransferMode.FIRST_EXECUTION, keyCache(), valueCache());
             }
             unifiedLayer.transferToDevice(
                     DataTransferMode.FIRST_EXECUTION,

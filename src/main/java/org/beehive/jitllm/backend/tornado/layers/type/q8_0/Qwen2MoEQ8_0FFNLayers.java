@@ -118,10 +118,7 @@ public class Qwen2MoEQ8_0FFNLayers
 
         configureAttention(layer, layerIndex);
         configureRoutedExperts(layer, layerIndex);
-        layer.persistOnDevice(
-                moeState.workspace.wrapX,
-                keyCache(),
-                valueCache());
+        layer.persistOnDevice(moeState.workspace.wrapX, keyCache(), valueCache());
         return layer;
     }
 
@@ -288,7 +285,9 @@ public class Qwen2MoEQ8_0FFNLayers
 
     /** The key cache in the representation the state holds: FP16 where it allocated one. */
     protected Object keyCache() {
-        return useFp16KVCache() ? moeState.workspace.wrapKeyCacheFP16 : moeState.workspace.wrapKeyCache;
+        return useFp16KVCache()
+                ? moeState.workspace.wrapKeyCacheFP16
+                : moeState.workspace.wrapKeyCache;
     }
 
     /** The value cache in the representation the state holds. */

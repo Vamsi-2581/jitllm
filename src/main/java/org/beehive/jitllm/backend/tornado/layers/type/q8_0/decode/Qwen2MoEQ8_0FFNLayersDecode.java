@@ -74,10 +74,7 @@ public final class Qwen2MoEQ8_0FFNLayersDecode extends Qwen2MoEQ8_0FFNLayers {
                     moeState.workspace.wrapExpertGate,
                     moeState.workspace.wrapSharedGate,
                     moeState.workspace.wrapSharedOutput);
-            layer.consumeFromDevice(
-                    "decodeActivation",
-                    keyCache(),
-                    valueCache());
+            layer.consumeFromDevice("decodeActivation", keyCache(), valueCache());
             layer.consumeFromDevice("decodeActivation", state.workspace.wrapBlockTable);
         } else {
             String predecessor = "layer_" + (layerIndex - 1);
