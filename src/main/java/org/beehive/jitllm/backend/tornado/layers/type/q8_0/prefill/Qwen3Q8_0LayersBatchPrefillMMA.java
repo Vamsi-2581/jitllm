@@ -8,6 +8,8 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
+import org.beehive.jitllm.backend.tornado.layers.Q8DecodedProjections;
+import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
@@ -75,6 +77,12 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     private final List<ImmutableTaskGraph> layerITGs;
     private String lastLayerTaskGraphID;
 
+    /** The attention as tensor-core GEMMs, or null for the flash-attention kernel. */
+    private final TensorCoreBatchAttention tcAttention;
+
+    /** The projections, each Q8_0 weight decoded to FP16 once per chunk. */
+    private final Q8DecodedProjections projections;
+
     public Qwen3Q8_0LayersBatchPrefillMMA(
             Qwen3State state,
             Qwen3TornadoWeights weights,
@@ -98,6 +106,33 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         this.qDim = config.numberOfHeadsKey() * config.numberOfHeads();
         this.kvDim = config.numberOfHeadsValue() * nHeadKv;
         this.gqa = config.numberOfHeads() / nHeadKv;
+        this.tcAttention =
+                TensorCoreBatchAttention.applies(useFp16KVCache(), paddedBatch, nEmbdHead)
+                        ? new TensorCoreBatchAttention(
+                                state,
+                                qDim,
+                                kvDim,
+                                nEmbdHead,
+                                config.numberOfHeads(),
+                                gqa,
+                                paddedBatch,
+                                config.contextLength())
+                        : null;
+        long dim = config.dim();
+        long widest =
+                Math.max(
+                        Math.max((qDim + 2L * kvDim) * dim, 2L * config.hiddenDim() * dim),
+                        Math.max(dim * qDim, dim * config.hiddenDim()));
+        this.projections = new Q8DecodedProjections(
+                        context,
+                        widest,
+                        paddedBatch,
+                        config.dim(),
+                        Q8DecodedProjections.resident(
+                                config.numberOfLayers()
+                                        * dim
+                                        * (2L * qDim + 2L * kvDim + 3L * config.hiddenDim())),
+                        4 * config.numberOfLayers());
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)
@@ -151,6 +186,12 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.woOut,
                     state.workspace.wrapHbFP16Batch,
                     state.workspace.w2Out);
+            batchPrefillLayer.transferToDevice(
+                    DataTransferMode.FIRST_EXECUTION, projections.buffers());
+            if (tcAttention != null) {
+                batchPrefillLayer.transferToDevice(
+                        DataTransferMode.FIRST_EXECUTION, tcAttention.buffers());
+            }
             // EVERY_EXECUTION, not once: acquiring or releasing a lease rewrites the table,
             // and a stale block index is still a valid index, so a table uploaded once leaves
             // the kernels reading a mapping that no longer exists, silently.
@@ -176,6 +217,10 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.woOut,
                     state.workspace.wrapHbFP16Batch,
                     state.workspace.w2Out);
+            batchPrefillLayer.consumeFromDevice(pred, projections.buffers());
+            if (tcAttention != null) {
+                batchPrefillLayer.consumeFromDevice(pred, tcAttention.buffers());
+            }
             batchPrefillLayer.consumeFromDevice(pred, state.workspace.wrapBlockTable);
         }
 
@@ -216,19 +261,16 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 dim);
 
         // Q, K, V in ONE tensor-core launch → packed [q|k|v] rows (stride qDim+2*kvDim)
-        batchPrefillLayer.task(
+        projections.project(
+                batchPrefillLayer,
                 "qkvProj",
-                TransformerBatchPrefillKernels::gemmMMAQKVQ8,
-                context,
                 state.workspace.wrapXbFP16Batch,
-                weights.wqLayered[layerIndex].asByteArray(),
-                weights.wkLayered[layerIndex].asByteArray(),
-                weights.wvLayered[layerIndex].asByteArray(),
                 state.workspace.qkvResultBatch,
                 paddedBatch,
-                qDim,
-                kvDim,
-                dim);
+                dim,
+                weights.wqLayered[layerIndex],
+                weights.wkLayered[layerIndex],
+                weights.wvLayered[layerIndex]);
 
         // Qwen3: per-head RMS norm on Q and K before RoPE
         batchPrefillLayer.task(
@@ -265,27 +307,32 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.kvBlockStride,
                     qDim);
 
-            // Register-partitioned flash attention over the packed buffer.
-            // The 'dim' parameter doubles as the packed-Q stride base and the
-            // attnOutFP16 row width — both are qDim for Qwen3.
-            batchPrefillLayer.task(
-                    "batch_attention",
-                    TransformerPagedKvBatchPrefillKernels::batchedFlashAttentionFP16OutKVFP16Paged,
-                    context,
-                    state.workspace.batchStartPosHolder,
-                    state.workspace.qkvResultBatch,
-                    state.workspace.wrapKeyCacheFP16,
-                    state.workspace.wrapValueCacheFP16,
-                    state.workspace.attnOutFP16,
-                    config.numberOfHeads(),
-                    nEmbdHead,
-                    kvDim,
-                    gqa,
-                    layerIndex,
-                    state.workspace.wrapBlockTable,
-                    state.kvBlockCfg,
-                    state.kvBlockStride,
-                    qDim);
+            if (tcAttention != null) {
+                tcAttention.appendTasks(batchPrefillLayer, context, layerIndex);
+            } else {
+                // Register-partitioned flash attention over the packed buffer.
+                // The 'dim' parameter doubles as the packed-Q stride base and the
+                // attnOutFP16 row width — both are qDim for Qwen3.
+                batchPrefillLayer.task(
+                        "batch_attention",
+                        TransformerPagedKvBatchPrefillKernels
+                                ::batchedFlashAttentionFP16OutKVFP16Paged,
+                        context,
+                        state.workspace.batchStartPosHolder,
+                        state.workspace.qkvResultBatch,
+                        state.workspace.wrapKeyCacheFP16,
+                        state.workspace.wrapValueCacheFP16,
+                        state.workspace.attnOutFP16,
+                        config.numberOfHeads(),
+                        nEmbdHead,
+                        kvDim,
+                        gqa,
+                        layerIndex,
+                        state.workspace.wrapBlockTable,
+                        state.kvBlockCfg,
+                        state.kvBlockStride,
+                        qDim);
+            }
         } else {
             batchPrefillLayer.task(
                     "batch_rope_kv",
@@ -328,16 +375,14 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         }
 
         // Output projection: [M=batch, N=dim, K=qDim]
-        batchPrefillLayer.task(
+        projections.project(
+                batchPrefillLayer,
                 "woProj",
-                TransformerBatchPrefillKernels::gemmMMAQ8,
-                context,
                 state.workspace.attnOutFP16,
-                weights.woLayered[layerIndex].asByteArray(),
                 state.workspace.woOut,
                 paddedBatch,
-                dim,
-                qDim);
+                qDim,
+                weights.woLayered[layerIndex]);
 
         // ── FFN Block ──────────────────────────────────────────────────────────
         batchPrefillLayer.task(
@@ -361,17 +406,15 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 state.workspace.ffnScaleBatch,
                 dim);
 
-        batchPrefillLayer.task(
+        projections.project(
+                batchPrefillLayer,
                 "gateUpProj",
-                TransformerBatchPrefillKernels::gemmMMAGateUpQ8,
-                context,
                 state.workspace.normedXFFNFP16,
-                weights.w1Layered[layerIndex].asByteArray(),
-                weights.w3Layered[layerIndex].asByteArray(),
                 state.workspace.gateUpResultBatch,
                 paddedBatch,
-                hidDim,
-                dim);
+                dim,
+                weights.w1Layered[layerIndex],
+                weights.w3Layered[layerIndex]);
 
         batchPrefillLayer
                 .task(
@@ -380,17 +423,16 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         context,
                         state.workspace.wrapHbFP16Batch,
                         state.workspace.gateUpResultBatch,
-                        hidDim)
-                .task(
-                        "w2Proj",
-                        TransformerBatchPrefillKernels::gemmMMAQ8,
-                        context,
-                        state.workspace.wrapHbFP16Batch,
-                        weights.w2Layered[layerIndex].asByteArray(),
-                        state.workspace.w2Out,
-                        paddedBatch,
-                        dim,
-                        hidDim)
+                        hidDim);
+        projections.project(
+                batchPrefillLayer,
+                "w2Proj",
+                state.workspace.wrapHbFP16Batch,
+                state.workspace.w2Out,
+                paddedBatch,
+                hidDim,
+                weights.w2Layered[layerIndex]);
+        batchPrefillLayer
                 .task(
                         "w2Resid",
                         TransformerBatchPrefillKernels::batchedResidualAddFP32,
@@ -463,7 +505,11 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             scheduler.addWorkerGrid(p + "qkvProj", mmaQkvWorker);
             scheduler.addWorkerGrid(p + "batch_qk_rmsnorm", qkRmsNormWorker);
             scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
-            scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            if (tcAttention != null) {
+                tcAttention.addGrids(scheduler, "batchPrefillLayer_" + i);
+            } else {
+                scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            }
             scheduler.addWorkerGrid(p + "woProj", mmaDimWorker);
             scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);
             scheduler.addWorkerGrid(p + "batch_ffn_rms_apply", ffnRmsApplyWorker);
@@ -472,6 +518,7 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             scheduler.addWorkerGrid(p + "w2Proj", mmaDimWorker);
             scheduler.addWorkerGrid(p + "w2Resid", ewDimWorker);
         }
+        projections.addGrids(scheduler);
     }
 
     public List<ImmutableTaskGraph> getLayerImmutableTaskGraphs() {

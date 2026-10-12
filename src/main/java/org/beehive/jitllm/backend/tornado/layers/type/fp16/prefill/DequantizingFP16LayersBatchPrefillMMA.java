@@ -1,6 +1,5 @@
 package org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill;
 
-import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.State;
@@ -102,10 +101,9 @@ public abstract class DequantizingFP16LayersBatchPrefillMMA extends LlamaFP16Lay
                 weights.wvLayered[layerIndex],
                 (qDim() + kvDim) * dim,
                 kvDim * dim);
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "qkvProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.wrapXbFP16Batch,
                 scratch(),
                 state.workspace.qkvResultBatch,
@@ -118,10 +116,9 @@ public abstract class DequantizingFP16LayersBatchPrefillMMA extends LlamaFP16Lay
     protected void attentionOutputProjection(TaskGraph batchPrefillLayer, int layerIndex) {
         int dim = config.dim();
         decode(batchPrefillLayer, "woDecode", weights.woLayered[layerIndex], 0, dim * qDim());
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "woProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.attnOutFP16,
                 scratch(),
                 state.workspace.woOut,
@@ -141,10 +138,9 @@ public abstract class DequantizingFP16LayersBatchPrefillMMA extends LlamaFP16Lay
                 weights.w3Layered[layerIndex],
                 hidden * dim,
                 hidden * dim);
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "gateUpProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.normedXFFNFP16,
                 scratch(),
                 state.workspace.gateUpResultBatch,
@@ -158,10 +154,9 @@ public abstract class DequantizingFP16LayersBatchPrefillMMA extends LlamaFP16Lay
         int dim = config.dim();
         int hidden = config.hiddenDim();
         decode(batchPrefillLayer, "downDecode", weights.w2Layered[layerIndex], 0, dim * hidden);
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "w2Proj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.wrapHbFP16Batch,
                 scratch(),
                 state.workspace.w2Out,

@@ -6,6 +6,8 @@ import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.layers.SplitKGemm;
+import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.State;
@@ -19,6 +21,8 @@ import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.WorkerGrid1D;
 import uk.ac.manchester.tornado.api.WorkerGrid2D;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 
 /**
  * Batched-prefill transformer-layer TaskGraphs for the unified batched prefill-decode plan ({@link
@@ -70,6 +74,12 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     private final List<ImmutableTaskGraph> layerITGs;
     private String lastLayerTaskGraphID;
 
+    /** The attention as tensor-core GEMMs, or null for the flash-attention kernel. */
+    private final TensorCoreBatchAttention tcAttention;
+
+    /** The projections' GEMM, its depth split when the output is too narrow for the device. */
+    private final SplitKGemm splitK;
+
     /**
      * The batched-prefill graphs only run on the CUDA backend (tensor-core gated), which is the
      * same backend the FP16 KV cache path targets.
@@ -95,6 +105,21 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                             + "GEMM efficiency is %d/%d — use a multiple of 128 for best throughput.%n",
                     batchSize, paddedBatch, batchSize, paddedBatch);
         }
+        int qDim = config.numberOfHeads() * config.headSize();
+        this.tcAttention =
+                TensorCoreBatchAttention.applies(
+                                useFp16KVCache(), paddedBatch, config.headSize())
+                        ? new TensorCoreBatchAttention(
+                                state,
+                                qDim,
+                                config.kvDim(),
+                                config.headSize(),
+                                config.numberOfHeads(),
+                                config.kvMul(),
+                                paddedBatch,
+                                config.contextLength())
+                        : null;
+        this.splitK = new SplitKGemm(context, paddedBatch, config.dim());
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)
@@ -137,6 +162,12 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.woOut,
                     state.workspace.wrapHbFP16Batch,
                     state.workspace.w2Out);
+            batchPrefillLayer.transferToDevice(
+                    DataTransferMode.FIRST_EXECUTION, splitK.partial());
+            if (tcAttention != null) {
+                batchPrefillLayer.transferToDevice(
+                        DataTransferMode.FIRST_EXECUTION, tcAttention.buffers());
+            }
             // wrapXBatch produced by the prefillActivation graph and persists in device memory
             // to consume it from there we should use the explicit uniqueTaskGraph name
             // the no-arg form would use current graph name, which causes NPE without CUDA Graphs
@@ -162,6 +193,10 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.woOut,
                     state.workspace.wrapHbFP16Batch,
                     state.workspace.w2Out);
+            batchPrefillLayer.consumeFromDevice(pred, splitK.partial());
+            if (tcAttention != null) {
+                batchPrefillLayer.consumeFromDevice(pred, tcAttention.buffers());
+            }
         }
 
         if (layerIndex == 0) {
@@ -255,6 +290,9 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         qDim);
             }
 
+            if (tcAttention != null) {
+                tcAttention.appendTasks(batchPrefillLayer, context, layerIndex);
+            } else {
             batchPrefillLayer.task(
                     "batch_attention",
                     packedHalf2Attention
@@ -277,6 +315,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.kvBlockCfg,
                     state.kvBlockStride,
                     qDim);
+            }
         } else {
             if (splitHalfRope()) {
                 batchPrefillLayer.task(
@@ -487,10 +526,9 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
      * The attention output projection: {@code attnOutFP16} through {@code wo} into {@code woOut}.
      */
     protected void attentionOutputProjection(TaskGraph batchPrefillLayer, int layerIndex) {
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "woProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.attnOutFP16,
                 weights.woLayered[layerIndex].asHalfFloatArray(),
                 state.workspace.woOut,
@@ -501,16 +539,32 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
 
     /** The down projection: {@code wrapHbFP16Batch} into {@code w2Out}. */
     protected void downProjection(TaskGraph batchPrefillLayer, int layerIndex) {
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "w2Proj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.wrapHbFP16Batch,
                 downWeight(layerIndex).asHalfFloatArray(),
                 state.workspace.w2Out,
                 batchSize,
                 config.dim(),
                 config.hiddenDim());
+    }
+
+    /**
+     * {@code c[m][n] = a[m][k] . b[n][k]^T} on the tensor cores as task {@code task}, its depth
+     * split when the output is too narrow to fill the device. The caller registers the unsplit
+     * grid under {@code task}.
+     */
+    protected void projectFP16(
+            TaskGraph layer,
+            String task,
+            HalfFloatArray a,
+            HalfFloatArray b,
+            FloatArray c,
+            int m,
+            int n,
+            int k) {
+        splitK.gemm(layer, task, a, b, c, m, n, k);
     }
 
     /** Per-layer weights a family adds to the shared projection set, uploaded with it. */
@@ -601,10 +655,15 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             scheduler.addWorkerGrid(p + "qkvProj", mmaQkvWorker);
             scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
             addFamilyTaskGrids(scheduler, p, i);
-            scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            if (tcAttention != null) {
+                tcAttention.addGrids(scheduler, "batchPrefillLayer_" + i);
+            } else {
+                scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            }
             scheduler.addWorkerGrid(p + "woProj", mmaDimWorker);
             addFeedForwardGrids(scheduler, p, i);
         }
+        splitK.addGrids(scheduler);
     }
 
     public List<ImmutableTaskGraph> getLayerImmutableTaskGraphs() {

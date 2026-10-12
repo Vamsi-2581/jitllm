@@ -2131,6 +2131,56 @@ public final class TransformerBatchPrefillKernels {
     }
 
     /**
+     * Decodes {@code n} Q8_0 weights into FP16 at {@code destOffset} of {@code out}, in the file's
+     * row-major order, for {@link #gemmMMA}: one thread per weight.
+     */
+    public static void dequantizeQ8_0ToFP16(
+            KernelContext context, ByteArray w, HalfFloatArray out, int destOffset, int n) {
+        int gid = context.globalIdx;
+        if (gid < n) {
+            int off = (gid >>> 5) * 34;
+            out.set(
+                    destOffset + gid,
+                    new HalfFloat(w.getHalfFloat(off).getFloat32() * w.get(off + 2 + (gid & 31))));
+        }
+    }
+
+    /** Lanes of {@link #dequantizeQ8_0ToFP16Once}'s fixed grid, which strides over the weight. */
+    public static final int DECODE_ONCE_LANES = 1024 * 256;
+
+    /**
+     * {@link #dequantizeQ8_0ToFP16} into a weight's resident FP16 copy, skipped once {@code
+     * done[flag]} is set: the copy outlives the chunk, so it is decoded on the first one only. A
+     * fixed grid of {@link #DECODE_ONCE_LANES} lanes strides over the {@code n} weights, so the
+     * skipped launches of every later chunk stay small.
+     */
+    public static void dequantizeQ8_0ToFP16Once(
+            KernelContext context,
+            ByteArray w,
+            HalfFloatArray out,
+            int destOffset,
+            int n,
+            IntArray done,
+            int flag) {
+        int gid = context.globalIdx;
+        if (gid < DECODE_ONCE_LANES && done.get(flag) == 0) {
+            for (int i = gid; i < n; i += DECODE_ONCE_LANES) {
+                int off = (i >>> 5) * 34;
+                out.set(
+                        destOffset + i,
+                        new HalfFloat(w.getHalfFloat(off).getFloat32() * w.get(off + 2 + (i & 31))));
+            }
+        }
+    }
+
+    /** Sets {@code done[flag]}, after the decodes it guards have run. One thread. */
+    public static void markDecoded(KernelContext context, IntArray done, int flag) {
+        if (context.globalIdx == 0) {
+            done.set(flag, 1);
+        }
+    }
+
+    /**
      * Tensor-core GEMM with Q8_0 weights: C[M,N] (FP32) = A[M,K] (FP16) × B[N,K] (Q8_0 blocks,
      * row-major). Same tiling, pipeline, and constraints as {@link #gemmMMA}.
      */

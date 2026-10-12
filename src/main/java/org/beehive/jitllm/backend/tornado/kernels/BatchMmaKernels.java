@@ -284,6 +284,31 @@ public final class BatchMmaKernels {
         }
     }
 
+    /**
+     * The attention output of a values GEMM run {@code wide} columns per head, back to {@code
+     * headSize} columns per head and narrowed to FP16: {@code out[t][h * headSize + c] = in[t][h *
+     * wide + c]} over {@code rows * heads * headSize} values. A head narrower than the GEMM's
+     * 128-wide column tile is computed 128 wide; the extra columns are dropped here.
+     */
+    public static void narrowHeadsToHalf(
+            KernelContext context,
+            FloatArray in,
+            HalfFloatArray out,
+            int heads,
+            int headSize,
+            int wide,
+            int n) {
+        int i = context.globalIdx;
+        if (i < n) {
+            int rowWidth = heads * headSize;
+            int t = i / rowWidth;
+            int col = i - t * rowWidth;
+            int h = col / headSize;
+            int c = col - h * headSize;
+            out.set(i, new HalfFloat(in.get(t * heads * wide + h * wide + c)));
+        }
+    }
+
     /** {@code out[i] = in[i]} narrowed to FP16, for {@code n} values. */
     public static void toHalf(KernelContext context, FloatArray in, HalfFloatArray out, int n) {
         int i = context.globalIdx;

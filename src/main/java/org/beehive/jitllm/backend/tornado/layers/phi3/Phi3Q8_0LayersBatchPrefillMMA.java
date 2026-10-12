@@ -1,6 +1,5 @@
 package org.beehive.jitllm.backend.tornado.layers.phi3;
 
-import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill.LlamaQ8_0LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.Phi3State;
@@ -41,30 +40,26 @@ public class Phi3Q8_0LayersBatchPrefillMMA extends LlamaQ8_0LayersBatchPrefillMM
 
     @Override
     protected void qkvProjection(TaskGraph batchPrefillLayer, int layerIndex) {
-        batchPrefillLayer.task(
+        projectQ8(
+                batchPrefillLayer,
                 "qkvProj",
-                TransformerBatchPrefillKernels::gemmMMAQ8,
-                context,
                 state.workspace.wrapXbFP16Batch,
-                phi3Weights().wqkvLayered[layerIndex].asByteArray(),
                 state.workspace.qkvResultBatch,
                 paddedBatch,
-                config.dim() + 2 * config.kvDim(),
-                config.dim());
+                config.dim(),
+                phi3Weights().wqkvLayered[layerIndex]);
     }
 
     @Override
     protected void gateUpProjection(TaskGraph batchPrefillLayer, int layerIndex) {
-        batchPrefillLayer.task(
+        projectQ8(
+                batchPrefillLayer,
                 "gateUpProj",
-                TransformerBatchPrefillKernels::gemmMMAQ8,
-                context,
                 state.workspace.normedXFFNFP16,
-                phi3Weights().wUpLayered[layerIndex].asByteArray(),
                 state.workspace.gateUpResultBatch,
                 paddedBatch,
-                2 * config.hiddenDim(),
-                config.dim());
+                config.dim(),
+                phi3Weights().wUpLayered[layerIndex]);
     }
 
     @Override
