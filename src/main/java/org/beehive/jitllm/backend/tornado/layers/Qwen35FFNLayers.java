@@ -1128,22 +1128,17 @@ public class Qwen35FFNLayers
     /**
      * The workgroup limit the delta-rule geometry is chosen against on {@code device}.
      *
-     * <p>The device's own maximum is an upper bound for a kernel, not a promise to every kernel.
-     * OpenCL fixes a kernel's limit ({@code CL_KERNEL_WORK_GROUP_SIZE}) when the driver compiles
-     * it, from the registers it ends up using, and TornadoVM compiles after the geometry is chosen.
-     * On an NVIDIA device through OpenCL the eight-part kernel's 1024-lane launch was refused with
-     * {@code CL_OUT_OF_RESOURCES} on every recurrent layer, and with it skipped the model generated
-     * degenerate text. So the full device limit is used on CUDA, where the 1024-lane launch is the
-     * one measured, and everywhere else it is capped at {@link #PORTABLE_SPLIT_WORKGROUP}, which
-     * admits the two-part kernel for this family's 128-wide value head.
+     * <p>The device's own maximum is an upper bound for a kernel, not a promise to every kernel: a
+     * kernel's real limit is fixed when the driver compiles it, from the registers it ends up
+     * using, and TornadoVM compiles after the geometry is chosen. The eight-part kernel's
+     * 1024-lane launch was refused on NVIDIA through OpenCL ({@code CL_OUT_OF_RESOURCES}) and on
+     * an A100 through CUDA ({@code CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES}), on every recurrent layer.
+     * So every backend is capped at {@link #PORTABLE_SPLIT_WORKGROUP}, which admits the two-part
+     * kernel for this family's 128-wide value head.
      */
     // @formatter:on
     public static long deltaRuleWorkGroupLimit(org.beehive.jitllm.runtime.backend.Device device) {
-        long limit = device.maxWorkGroupSize();
-        if (org.beehive.jitllm.runtime.backend.BackendId.CUDA.equals(device.backend())) {
-            return limit;
-        }
-        return Math.min(limit, PORTABLE_SPLIT_WORKGROUP);
+        return Math.min(device.maxWorkGroupSize(), PORTABLE_SPLIT_WORKGROUP);
     }
 
     private DeltaRuleGeometry deltaRuleGeometry() {
