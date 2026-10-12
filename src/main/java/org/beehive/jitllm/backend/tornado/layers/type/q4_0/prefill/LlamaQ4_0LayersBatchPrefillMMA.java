@@ -20,9 +20,9 @@ public class LlamaQ4_0LayersBatchPrefillMMA extends DequantizingFP16LayersBatchP
     }
 
     /**
-     * Uploads the weights through the session's repack, as the decode layers that bind them
-     * expect: on a device that runs the packed int8 kernels the Q4_0 projections are repacked into
-     * tiles on upload.
+     * Uploads the weights through the session's repack, as the decode layers that bind them expect:
+     * on a device that runs the packed int8 kernels the Q4_0 projections are repacked into tiles on
+     * upload.
      */
     @Override
     protected void uploadLayerWeights(TaskGraph batchPrefillLayer, int layerIndex) {

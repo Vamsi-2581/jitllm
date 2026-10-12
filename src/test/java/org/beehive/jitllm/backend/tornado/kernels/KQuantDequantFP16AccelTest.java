@@ -14,7 +14,10 @@ import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 
-/** The Q4_K, Q6_K and packed Q4_0 to FP16 decodes on the device against the host decode, element by element. */
+/**
+ * The Q4_K, Q6_K and packed Q4_0 to FP16 decodes on the device against the host decode, element by
+ * element.
+ */
 public class KQuantDequantFP16AccelTest {
 
     private static final int BLOCKS = 8;
@@ -146,7 +149,11 @@ public class KQuantDequantFP16AccelTest {
         }
         for (int i = 0; i < n; i++) {
             float expected = TransformerComputeKernelsQ4_0.decode(w, (i / 32) * 18, i % 32);
-            assertEquals("element " + i, new HalfFloat(expected).getFloat32(), out.get(i).getFloat32(), 0f);
+            assertEquals(
+                    "element " + i,
+                    new HalfFloat(expected).getFloat32(),
+                    out.get(i).getFloat32(),
+                    0f);
         }
     }
 }

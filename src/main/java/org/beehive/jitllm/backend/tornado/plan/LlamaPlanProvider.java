@@ -60,9 +60,9 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
     }
 
     /**
-     * Llama Q4_0's batched prefill runs its projections in cuBLAS, through the JIT tensor-core
-     * GEMM on FP16-decoded weights, or on the Metal SIMD-group kernels: elsewhere there is nothing
-     * to build.
+     * Llama Q4_0's batched prefill runs its projections in cuBLAS, through the JIT tensor-core GEMM
+     * on FP16-decoded weights, or on the Metal SIMD-group kernels: elsewhere there is nothing to
+     * build.
      */
     @Override
     public Optional<String> batchPrefillNeeds(Combination c, ExecutionPolicy policy) {

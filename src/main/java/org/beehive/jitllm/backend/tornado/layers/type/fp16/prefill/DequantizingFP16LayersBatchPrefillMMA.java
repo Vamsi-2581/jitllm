@@ -78,7 +78,10 @@ public abstract class DequantizingFP16LayersBatchPrefillMMA extends LlamaFP16Lay
         }
     }
 
-    /** Adds the task {@code task} that decodes {@code n} elements of {@code w} into the scratch at {@code destOffset}. */
+    /**
+     * Adds the task {@code task} that decodes {@code n} elements of {@code w} into the scratch at
+     * {@code destOffset}.
+     */
     protected abstract void decode(
             TaskGraph layer, String task, TornadoTensor w, int destOffset, int n);
 

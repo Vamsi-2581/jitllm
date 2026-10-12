@@ -2,10 +2,10 @@ package org.beehive.jitllm.backend.tornado.kernels;
 
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.math.TornadoMath;
-import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
-import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 import uk.ac.manchester.tornado.api.types.HalfFloat;
+import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 import uk.ac.manchester.tornado.api.utils.QuantizationUtils;
 
@@ -104,13 +104,18 @@ public final class TransformerComputeKernelsQ4_0 {
      * {@link #dequantizeQ4_0ToFP16} over a weight in the int8 GEMM's packed tiles ({@code
      * PackedTilePacker.packQ4_0}), written back in the file's row-major order. Element {@code (r,
      * c)} of the {@code n / cols} by {@code cols} weight lies in the 4608-byte tile of column tile
-     * {@code r / 128} and round {@code c / 64}: its nibble in the 64-bit word of GEMM thread
-     * {@code ((r % 64) / 2) * 16 + q / 2}, 16-bit group {@code 2b + (r % 128) / 64}, byte {@code r
-     * & 1}, half {@code q & 1}, for block {@code b} and quant {@code q} within the round; its scale
-     * the round's {@code (b * 128 + r % 128)}-th after the 4096 bytes of nibbles.
+     * {@code r / 128} and round {@code c / 64}: its nibble in the 64-bit word of GEMM thread {@code
+     * ((r % 64) / 2) * 16 + q / 2}, 16-bit group {@code 2b + (r % 128) / 64}, byte {@code r & 1},
+     * half {@code q & 1}, for block {@code b} and quant {@code q} within the round; its scale the
+     * round's {@code (b * 128 + r % 128)}-th after the 4096 bytes of nibbles.
      */
     public static void dequantizeQ4_0PackedToFP16(
-            KernelContext context, ByteArray w, HalfFloatArray out, int destOffset, int n, int cols) {
+            KernelContext context,
+            ByteArray w,
+            HalfFloatArray out,
+            int destOffset,
+            int n,
+            int cols) {
         int gid = context.globalIdx;
         if (gid < n) {
             int r = gid / cols;
