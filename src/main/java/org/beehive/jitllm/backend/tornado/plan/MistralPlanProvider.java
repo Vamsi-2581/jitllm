@@ -29,6 +29,12 @@ public final class MistralPlanProvider implements TornadoPlanProvider {
         return ID;
     }
 
+    /** The FP16 and Q8_0 logits sample on the device; a Q4_0 file's logits are the Q8_0 layer. */
+    @Override
+    public boolean deviceSampling(DataType weights) {
+        return weights == DataType.F16 || weights == DataType.Q8_0 || weights == DataType.Q4_0;
+    }
+
     @Override
     public Set<DataType> supportedDataTypes() {
         return TornadoSupportSets.BOTH_REPRESENTATIONS;

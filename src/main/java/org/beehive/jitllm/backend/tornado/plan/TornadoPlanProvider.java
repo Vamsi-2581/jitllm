@@ -3,6 +3,7 @@ package org.beehive.jitllm.backend.tornado.plan;
 import java.util.Optional;
 import java.util.Set;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
+import org.beehive.jitllm.backend.tornado.layers.BatchDecodeLayers;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
@@ -25,6 +26,23 @@ public interface TornadoPlanProvider {
 
     /** The identity these components implement. Two providers claiming one identity is an error. */
     ArchitectureId architecture();
+
+    /**
+     * This family's layers for a batched decode step over a shared key/value cache (continuous
+     * batching), or empty when it has none.
+     */
+    default Optional<BatchDecodeLayers> batchDecodeLayers(
+            State state, Model model, BatchDecode decode) {
+        return Optional.empty();
+    }
+
+    /**
+     * Whether this family's logits can sample greedily on the device, and its decode loop read the
+     * token from there, for weights in {@code weights}.
+     */
+    default boolean deviceSampling(DataType weights) {
+        return false;
+    }
 
     /**
      * The <b>model-wide</b> weight representations this provider builds plan components for.

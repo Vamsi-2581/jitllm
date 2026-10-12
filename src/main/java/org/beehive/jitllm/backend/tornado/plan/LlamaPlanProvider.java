@@ -5,14 +5,18 @@ import java.util.Set;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
+import org.beehive.jitllm.backend.tornado.layers.BatchDecodeLayers;
+import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.LlamaFP16LayersBatchDecodeMMA;
 import org.beehive.jitllm.backend.tornado.lowering.TornadoSupportSets;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.fp16.LlamaFP16PlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.q8_0.LlamaQ8_0PlanComponents;
 import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.state.State;
+import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
+import org.beehive.jitllm.model.llama.LlamaConfiguration;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
@@ -30,6 +34,34 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
     @Override
     public ArchitectureId architecture() {
         return ID;
+    }
+
+    /** FP16 weights: the tensor-core decode layers, contiguous or paged. */
+    @Override
+    public Optional<BatchDecodeLayers> batchDecodeLayers(
+            State state, Model model, BatchDecode decode) {
+        if (model.weights().dataType() != DataType.F16) {
+            return Optional.empty();
+        }
+        return Optional.of(
+                new LlamaFP16LayersBatchDecodeMMA(
+                        PlanStates.expect(LlamaState.class, state, ID),
+                        (LlamaTornadoWeights) model.weights(),
+                        (LlamaConfiguration) model.configuration(),
+                        decode.batchSize(),
+                        decode.decodeContext(),
+                        decode.keyCache(),
+                        decode.valueCache(),
+                        decode.seqPositions(),
+                        decode.blockTable(),
+                        decode.blockSize(),
+                        decode.maxBlocksPerSlot()));
+    }
+
+    /** The FP16 and Q8_0 logits sample on the device; a Q4_0 file's logits are the Q8_0 layer. */
+    @Override
+    public boolean deviceSampling(DataType weights) {
+        return weights == DataType.F16 || weights == DataType.Q8_0 || weights == DataType.Q4_0;
     }
 
     @Override

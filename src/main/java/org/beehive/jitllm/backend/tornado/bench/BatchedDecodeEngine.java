@@ -4,18 +4,15 @@ import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.List;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.LlamaFP16LayersBatchDecodeMMA;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.decode.Qwen3FP16LayersBatchDecodeMMA;
+import org.beehive.jitllm.backend.tornado.layers.BatchDecodeLayers;
+import org.beehive.jitllm.backend.tornado.plan.BatchDecode;
+import org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry;
 import org.beehive.jitllm.backend.tornado.plan.components.activation.BatchPrefillActivation;
-import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.state.State;
-import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
 import org.beehive.jitllm.inference.weights.tornado.TornadoWeights;
 import org.beehive.jitllm.model.Configuration;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.model.format.ChatFormat;
-import org.beehive.jitllm.model.llama.LlamaConfiguration;
-import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
@@ -194,16 +191,11 @@ public class BatchedDecodeEngine {
         Configuration config = model.configuration();
         TornadoWeights weights = (TornadoWeights) model.weights();
         State state = model.createNewState();
-        boolean isQwen3 = config instanceof Qwen3Configuration;
 
         int dim = config.dim();
         int vocab = config.vocabularySize();
         int numLayers = config.numberOfLayers();
-        int kvDim =
-                isQwen3
-                        ? ((Qwen3Configuration) config).numberOfHeadsValue()
-                                * config.numberOfKeyValueHeads()
-                        : (config.dim() * config.numberOfKeyValueHeads()) / config.numberOfHeads();
+        int kvDim = config.kvDim();
         int paddedB = (B + 127) & ~127;
 
         // ── Prompt tokens ──────────────────────────────────────────────────────
@@ -256,67 +248,29 @@ public class BatchedDecodeEngine {
         // ── Graphs: [0] activation, [1.N] decode layers, [N+1] batched logits ──
         BatchPrefillActivation activation = new BatchPrefillActivation(state, config, B, false);
 
-        List<ImmutableTaskGraph> layerITGs;
-        String lastLayerId;
-        java.util.function.Consumer<GridScheduler> updateLayerSched;
-        if (isQwen3) {
-            var qState = (org.beehive.jitllm.inference.state.Qwen3State) state;
-            var qWeights =
-                    (org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights) weights;
-            Qwen3FP16LayersBatchDecodeMMA q =
-                    paged
-                            ? new Qwen3FP16LayersBatchDecodeMMA(
-                                    qState,
-                                    qWeights,
-                                    (Qwen3Configuration) config,
-                                    B,
-                                    decodeCtx,
-                                    keyCacheBatch,
-                                    valueCacheBatch,
-                                    seqPositions,
-                                    blockTable,
-                                    blockSize,
-                                    maxBlocksPerSlot)
-                            : new Qwen3FP16LayersBatchDecodeMMA(
-                                    qState,
-                                    qWeights,
-                                    (Qwen3Configuration) config,
-                                    B,
-                                    decodeCtx,
-                                    keyCacheBatch,
-                                    valueCacheBatch,
-                                    seqPositions);
-            layerITGs = q.getLayerImmutableTaskGraphs();
-            lastLayerId = q.getLastLayerTaskGraphID();
-            updateLayerSched = q::updateGridScheduler;
-        } else {
-            LlamaFP16LayersBatchDecodeMMA l =
-                    paged
-                            ? new LlamaFP16LayersBatchDecodeMMA(
-                                    (LlamaState) state,
-                                    (LlamaTornadoWeights) weights,
-                                    (LlamaConfiguration) config,
-                                    B,
-                                    decodeCtx,
-                                    keyCacheBatch,
-                                    valueCacheBatch,
-                                    seqPositions,
-                                    blockTable,
-                                    blockSize,
-                                    maxBlocksPerSlot)
-                            : new LlamaFP16LayersBatchDecodeMMA(
-                                    (LlamaState) state,
-                                    (LlamaTornadoWeights) weights,
-                                    (LlamaConfiguration) config,
-                                    B,
-                                    decodeCtx,
-                                    keyCacheBatch,
-                                    valueCacheBatch,
-                                    seqPositions);
-            layerITGs = l.getLayerImmutableTaskGraphs();
-            lastLayerId = l.getLastLayerTaskGraphID();
-            updateLayerSched = l::updateGridScheduler;
-        }
+        BatchDecode decode =
+                new BatchDecode(
+                        B,
+                        decodeCtx,
+                        keyCacheBatch,
+                        valueCacheBatch,
+                        seqPositions,
+                        paged ? blockTable : null,
+                        paged ? blockSize : 0,
+                        paged ? maxBlocksPerSlot : 0);
+        BatchDecodeLayers layers =
+                TornadoPlanRegistry.provider(model.architectureId())
+                        .flatMap(provider -> provider.batchDecodeLayers(state, model, decode))
+                        .orElseThrow(
+                                () ->
+                                        new IllegalArgumentException(
+                                                "batched decode is not implemented for "
+                                                        + model.architectureId()
+                                                        + " / "
+                                                        + model.weights().dataType()));
+        List<ImmutableTaskGraph> layerITGs = layers.getLayerImmutableTaskGraphs();
+        String lastLayerId = layers.getLastLayerTaskGraphID();
+        java.util.function.Consumer<GridScheduler> updateLayerSched = layers::updateGridScheduler;
 
         KernelContext logitsCtx = new KernelContext();
         HalfFloatArray wclsHalf = weights.wclsByteArray.asHalfFloatArray();

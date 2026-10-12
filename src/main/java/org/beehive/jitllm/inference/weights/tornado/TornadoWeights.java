@@ -89,4 +89,9 @@ public abstract class TornadoWeights implements Weights {
     public DataType dataType() {
         return weightType;
     }
+
+    /** Lanes per workgroup for the RMS norm in front of the logits. */
+    public int logitsRmsLocalSize() {
+        return 256;
+    }
 }

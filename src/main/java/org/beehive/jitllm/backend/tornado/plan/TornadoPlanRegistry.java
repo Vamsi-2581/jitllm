@@ -98,6 +98,11 @@ public final class TornadoPlanRegistry {
         return provider == null ? java.util.Set.of() : provider.nativeTensorTypes();
     }
 
+    /** The provider registered for {@code architecture}, if any. */
+    public static Optional<TornadoPlanProvider> provider(ArchitectureId architecture) {
+        return Optional.ofNullable(Index.BY_ID.get(architecture));
+    }
+
     /** Which architectures have migrated to a registered plan provider. */
     public static java.util.Set<ArchitectureId> registered() {
         return new java.util.LinkedHashSet<>(Index.BY_ID.keySet());
