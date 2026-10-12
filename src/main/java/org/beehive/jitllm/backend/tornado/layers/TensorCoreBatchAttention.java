@@ -28,9 +28,9 @@ import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
  * read.
  *
  * <p>The GEMM tiles columns 128 at a time. A head 128 wide (or a multiple) writes its values
- * straight into the output; a narrower one, 64 wide, is computed 128 wide into a scratch with a
- * 128-column slot per head and narrowed on the way to FP16. The extra columns read the next
- * key/value head's rows, so the transposed values carry one head of zero padding.
+ * straight into the output; any other width (64, 96) is computed rounded up to the next 128 into a
+ * scratch with that many columns per head and narrowed on the way to FP16. The extra columns read the next
+ * key/value head's rows, so the transposed values carry that much zero padding past the last head.
  */
 // @formatter:on
 public final class TensorCoreBatchAttention {
@@ -59,12 +59,13 @@ public final class TensorCoreBatchAttention {
 
     /**
      * Whether a layer of this shape takes the tensor-core attention: an FP16 cache, a padded batch
-     * of whole 128-row tiles, a head a multiple of 64 wide, and tensor cores.
+     * of whole 128-row tiles, a head a multiple of 16 wide (the GEMM's depth step), and tensor
+     * cores.
      */
     public static boolean applies(boolean fp16Cache, int paddedRows, int headSize) {
         return fp16Cache
                 && paddedRows % TILE == 0
-                && headSize % 64 == 0
+                && headSize % 16 == 0
                 && TensorCoreSupport.isTensorCoreCapableBackend();
     }
 

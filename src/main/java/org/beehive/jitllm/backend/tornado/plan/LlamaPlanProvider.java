@@ -85,6 +85,6 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
 
     @Override
     public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q4_0);
+        return Set.of(DataType.Q4_0, DataType.Q8_0, DataType.F16);
     }
 }

@@ -8,7 +8,8 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
-import org.beehive.jitllm.backend.tornado.layers.Q8DecodedProjections;
+import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
+import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
@@ -81,7 +82,7 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     private final TensorCoreBatchAttention tcAttention;
 
     /** The projections, each Q8_0 weight decoded to FP16 once per chunk. */
-    private final Q8DecodedProjections projections;
+    private final FP16Projections projections;
 
     public Qwen3Q8_0LayersBatchPrefillMMA(
             Qwen3State state,
@@ -123,16 +124,17 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 Math.max(
                         Math.max((qDim + 2L * kvDim) * dim, 2L * config.hiddenDim() * dim),
                         Math.max(dim * qDim, dim * config.hiddenDim()));
-        this.projections = new Q8DecodedProjections(
+        this.projections = new FP16Projections(
                         context,
                         widest,
                         paddedBatch,
                         config.dim(),
-                        Q8DecodedProjections.resident(
+                        FP16Projections.resident(
                                 config.numberOfLayers()
                                         * dim
                                         * (2L * qDim + 2L * kvDim + 3L * config.hiddenDim())),
-                        4 * config.numberOfLayers());
+                        4 * config.numberOfLayers(),
+                        NativePrefillSupport.nativeProjections(state.executionPolicy()));
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)

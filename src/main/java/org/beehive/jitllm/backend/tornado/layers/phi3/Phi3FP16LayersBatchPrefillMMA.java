@@ -1,6 +1,5 @@
 package org.beehive.jitllm.backend.tornado.layers.phi3;
 
-import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.Phi3State;
@@ -41,10 +40,9 @@ public class Phi3FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillMM
 
     @Override
     protected void qkvProjection(TaskGraph batchPrefillLayer, int layerIndex) {
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "qkvProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.wrapXbFP16Batch,
                 phi3Weights().wqkvLayered[layerIndex].asHalfFloatArray(),
                 state.workspace.qkvResultBatch,
@@ -55,10 +53,9 @@ public class Phi3FP16LayersBatchPrefillMMA extends LlamaFP16LayersBatchPrefillMM
 
     @Override
     protected void gateUpProjection(TaskGraph batchPrefillLayer, int layerIndex) {
-        batchPrefillLayer.task(
+        projectFP16(
+                batchPrefillLayer,
                 "gateUpProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
                 state.workspace.normedXFFNFP16,
                 phi3Weights().wUpLayered[layerIndex].asHalfFloatArray(),
                 state.workspace.gateUpResultBatch,

@@ -11,6 +11,7 @@ import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid3D;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.cublas.CuBlas;
 
 // @formatter:off
 /**
@@ -22,6 +23,9 @@ import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
  * hundred multiprocessors, so below {@link #MIN_BLOCKS} tiles the depth is cut into up to {@link
  * #MAX_SLICES} slices ({@link Gemma4BatchPrefillKernels#gemmMMASplitK}) whose partial products
  * {@link Gemma4BatchPrefillKernels#splitKReduce} then sums.
+ *
+ * <p>Under native libraries every GEMM is cuBLAS's ({@code cublasGemmExFP16FP32}), unsplit: the
+ * weight row-major {@code [n][k]} is read transposed, as the Qwen3 F16 native projections read it.
  */
 // @formatter:on
 public final class SplitKGemm {
@@ -36,6 +40,7 @@ public final class SplitKGemm {
             !"false".equalsIgnoreCase(System.getProperty("jitllm.prefill.splitK", "true"));
 
     private final KernelContext context;
+    private final boolean nativeGemm;
     private final FloatArray partial;
     private final Map<String, int[]> splitTasks = new LinkedHashMap<>();
 
@@ -43,9 +48,16 @@ public final class SplitKGemm {
      * @param rows the padded batch, the GEMMs' row count
      * @param widestSplit the widest output a split GEMM may write
      */
-    public SplitKGemm(KernelContext context, int rows, int widestSplit) {
+    public SplitKGemm(KernelContext context, int rows, int widestSplit, boolean nativeGemm) {
         this.context = context;
-        this.partial = new FloatArray(Math.toIntExact((long) MAX_SLICES * rows * widestSplit));
+        this.nativeGemm = nativeGemm;
+        long partialSize = nativeGemm ? 1 : (long) MAX_SLICES * rows * widestSplit;
+        this.partial = new FloatArray(Math.toIntExact(partialSize));
+    }
+
+    /** Whether the GEMMs are cuBLAS's. */
+    public boolean nativeGemm() {
+        return nativeGemm;
     }
 
     /** The partial-product buffer, which every layer graph transfers or consumes. */
@@ -55,7 +67,7 @@ public final class SplitKGemm {
 
     /** The depth slices for an {@code m x n} output over depth {@code k}: 1 for no split. */
     int slices(int m, int n, int k) {
-        if (!ENABLED || m % 128 != 0 || (long) m * n * MAX_SLICES > partial.getSize()) {
+        if (nativeGemm || !ENABLED || m % 128 != 0 || (long) m * n * MAX_SLICES > partial.getSize()) {
             return 1;
         }
         int blocks = (m / 128) * (n / 128);
@@ -79,6 +91,11 @@ public final class SplitKGemm {
             int m,
             int n,
             int k) {
+        if (nativeGemm) {
+            layer.libraryTask(
+                    task, CuBlas::cublasGemmExFP16FP32, 1, 0, n, m, k, 1.0f, b, k, a, k, 0.0f, c, n);
+            return;
+        }
         int s = slices(m, n, k);
         if (s == 1) {
             layer.task(task, TransformerBatchPrefillKernels::gemmMMA, context, a, b, c, m, n, k);

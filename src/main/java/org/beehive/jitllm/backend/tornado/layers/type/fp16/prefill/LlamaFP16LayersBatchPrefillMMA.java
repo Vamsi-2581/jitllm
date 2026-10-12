@@ -6,6 +6,8 @@ import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.NativePrefillSupport;
+import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.SplitKGemm;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
@@ -81,6 +83,12 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     private final SplitKGemm splitK;
 
     /**
+     * Under native libraries, the stacked Q/K/V and gate/up weights copied into one buffer each so
+     * one cuBLAS call covers them; null for the JIT GEMMs, which read the weights where they are.
+     */
+    private final FP16Projections stacked;
+
+    /**
      * The batched-prefill graphs only run on the CUDA backend (tensor-core gated), which is the
      * same backend the FP16 KV cache path targets.
      */
@@ -119,7 +127,28 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                                 paddedBatch,
                                 config.contextLength())
                         : null;
-        this.splitK = new SplitKGemm(context, paddedBatch, config.dim());
+        this.splitK =
+                new SplitKGemm(
+                        context,
+                        paddedBatch,
+                        config.dim(),
+                        NativePrefillSupport.nativeProjections(state.executionPolicy()));
+        long dimL = config.dim();
+        long layerWeights =
+                dimL * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim());
+        this.stacked =
+                splitK.nativeGemm()
+                        ? new FP16Projections(
+                                context,
+                                Math.max(
+                                        (qDim + 2L * config.kvDim()) * dimL,
+                                        2L * config.hiddenDim() * dimL),
+                                paddedBatch,
+                                config.dim(),
+                                FP16Projections.resident(config.numberOfLayers() * layerWeights),
+                                2 * config.numberOfLayers(),
+                                true)
+                        : null;
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)
@@ -164,6 +193,10 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.w2Out);
             batchPrefillLayer.transferToDevice(
                     DataTransferMode.FIRST_EXECUTION, splitK.partial());
+            if (stacked != null) {
+                batchPrefillLayer.transferToDevice(
+                        DataTransferMode.FIRST_EXECUTION, stacked.buffers());
+            }
             if (tcAttention != null) {
                 batchPrefillLayer.transferToDevice(
                         DataTransferMode.FIRST_EXECUTION, tcAttention.buffers());
@@ -194,6 +227,9 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     state.workspace.wrapHbFP16Batch,
                     state.workspace.w2Out);
             batchPrefillLayer.consumeFromDevice(pred, splitK.partial());
+            if (stacked != null) {
+                batchPrefillLayer.consumeFromDevice(pred, stacked.buffers());
+            }
             if (tcAttention != null) {
                 batchPrefillLayer.consumeFromDevice(pred, tcAttention.buffers());
             }
@@ -418,6 +454,19 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         int dim = config.dim();
         int qDim = config.numberOfHeads() * config.headSize();
         int kvDim = config.kvDim();
+        if (stacked != null) {
+            stacked.project(
+                    batchPrefillLayer,
+                    "qkvProj",
+                    state.workspace.wrapXbFP16Batch,
+                    state.workspace.qkvResultBatch,
+                    paddedBatch,
+                    dim,
+                    weights.wqLayered[layerIndex],
+                    weights.wkLayered[layerIndex],
+                    weights.wvLayered[layerIndex]);
+            return;
+        }
         batchPrefillLayer.task(
                 "qkvProj",
                 TransformerBatchPrefillKernels::gemmMMAQKV,
@@ -439,6 +488,18 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     protected void gateUpProjection(TaskGraph batchPrefillLayer, int layerIndex) {
         int dim = config.dim();
         int hidDim = config.hiddenDim();
+        if (stacked != null) {
+            stacked.project(
+                    batchPrefillLayer,
+                    "gateUpProj",
+                    state.workspace.normedXFFNFP16,
+                    state.workspace.gateUpResultBatch,
+                    paddedBatch,
+                    dim,
+                    weights.w1Layered[layerIndex],
+                    weights.w3Layered[layerIndex]);
+            return;
+        }
         batchPrefillLayer.task(
                 "gateUpProj",
                 TransformerBatchPrefillKernels::gemmMMAGateUp,
@@ -664,6 +725,9 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
             addFeedForwardGrids(scheduler, p, i);
         }
         splitK.addGrids(scheduler);
+        if (stacked != null) {
+            stacked.addGrids(scheduler);
+        }
     }
 
     public List<ImmutableTaskGraph> getLayerImmutableTaskGraphs() {

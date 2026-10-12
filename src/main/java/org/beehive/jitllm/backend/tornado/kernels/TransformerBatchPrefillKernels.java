@@ -2173,6 +2173,27 @@ public final class TransformerBatchPrefillKernels {
         }
     }
 
+    /**
+     * {@code out[destOffset + i] = src[i]} for {@code n} halves, skipped once {@code done[flag]} is
+     * set: an FP16 weight copied into a buffer it shares with the other weights of one GEMM. Same
+     * striding grid as {@link #dequantizeQ8_0ToFP16Once}.
+     */
+    public static void copyFP16Once(
+            KernelContext context,
+            HalfFloatArray src,
+            HalfFloatArray out,
+            int destOffset,
+            int n,
+            IntArray done,
+            int flag) {
+        int gid = context.globalIdx;
+        if (gid < DECODE_ONCE_LANES && done.get(flag) == 0) {
+            for (int i = gid; i < n; i += DECODE_ONCE_LANES) {
+                out.set(destOffset + i, src.get(i));
+            }
+        }
+    }
+
     /** Sets {@code done[flag]}, after the decodes it guards have run. One thread. */
     public static void markDecoded(KernelContext context, IntArray done, int flag) {
         if (context.globalIdx == 0) {

@@ -124,12 +124,13 @@ public class LlamaQ4_0PlanComponents
     @Override
     public BatchPrefillTransformerLayerTaskGraphs batchPrefillTransformerLayers(
             int batchSize, int firstLayer, int endLayer) {
+        // The whole model: the projections decoded to FP16, then the tensor-core GEMM (cuBLAS
+        // under native libraries). A pipeline stage keeps the int8/cuBLAS layers, which build any
+        // range of layers.
+        if (firstLayer == 0 && endLayer == config.numberOfLayers()) {
+            return new LlamaQ4_0LayersBatchPrefillMMA(state, weights, config, batchSize);
+        }
         if (!NativePrefillSupport.nativeProjections(state.executionPolicy())) {
-            // Without cuBLAS: the projections decoded to FP16 for the JIT tensor-core GEMM, which
-            // builds the whole model in one plan.
-            if (firstLayer == 0 && endLayer == config.numberOfLayers()) {
-                return new LlamaQ4_0LayersBatchPrefillMMA(state, weights, config, batchSize);
-            }
             throw new UnsupportedOperationException(
                     "the Llama Q4_0 batched prefill of a pipeline stage runs its projections"
                             + " through cuBLAS: add --with-native-libraries");

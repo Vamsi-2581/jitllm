@@ -328,7 +328,7 @@ public class Qwen3FP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                                 paddedBatch,
                                 config.contextLength())
                         : null;
-        this.splitK = new SplitKGemm(context, paddedBatch, config.dim());
+        this.splitK = new SplitKGemm(context, paddedBatch, config.dim(), false);
         int cudnnElems = cudnnAttention ? qDim * batchSize : 0;
         this.cudnnQ = new HalfFloatArray(cudnnElems);
         this.cudnnK = new HalfFloatArray(cudnnElems);

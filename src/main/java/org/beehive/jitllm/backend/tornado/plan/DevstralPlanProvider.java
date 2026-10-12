@@ -77,4 +77,10 @@ public final class DevstralPlanProvider implements TornadoPlanProvider {
         }
         return new DevstralQ8_0PlanComponents(typed, model);
     }
+
+    /** The batched prefill's projections through cuBLAS, quantized weights decoded to FP16 first. */
+    @Override
+    public Set<DataType> nativeLibraryWeights() {
+        return Set.of(DataType.Q8_0, DataType.Q4_K, DataType.F16);
+    }
 }

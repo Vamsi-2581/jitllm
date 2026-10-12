@@ -48,9 +48,12 @@ public final class Qwen3PlanProvider implements TornadoPlanProvider {
         return Fp16KeyValueSupport.nvidiaDecodeLayers(c, false);
     }
 
-    /** F16: projections through cuBLAS, the first chunk's attention through cuDNN. */
+    /**
+     * F16: projections through cuBLAS, the first chunk's attention through cuDNN. Q8_0: projections
+     * through cuBLAS over the weights decoded to FP16.
+     */
     @Override
     public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.F16);
+        return Set.of(DataType.F16, DataType.Q8_0);
     }
 }

@@ -61,4 +61,10 @@ public final class Phi3PlanProvider implements TornadoPlanProvider {
                         "the phi3 batched prefill runs on the Metal SIMD-group kernels or the CUDA"
                                 + " tensor cores, for its fused QKV and gate/up weights");
     }
+
+    /** The batched prefill's projections through cuBLAS: Q8_0 weights decoded to FP16 first; F16 weights' output and down projections. */
+    @Override
+    public Set<DataType> nativeLibraryWeights() {
+        return Set.of(DataType.Q8_0, DataType.F16);
+    }
 }

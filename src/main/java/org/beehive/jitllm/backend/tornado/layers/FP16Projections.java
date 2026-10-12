@@ -7,6 +7,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.PackedWeights;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
+import org.beehive.jitllm.runtime.tensor.DataType;
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
@@ -17,8 +18,9 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 // @formatter:off
 /**
- * The Q8_0 projections of a tensor-core batched prefill as FP16 GEMMs: each weight decoded into one
- * shared FP16 scratch, then {@link TransformerBatchPrefillKernels#gemmMMA} over it.
+ * The projections of a tensor-core batched prefill as FP16 GEMMs over one buffer per GEMM: each
+ * weight decoded (Q8_0) or copied (F16) into it after the one before, then one GEMM over all of
+ * them. Copying is what lets the F16 Q, K and V, or gate and up, go through cuBLAS as one call.
  *
  * <p>The Q8_0 GEMM decodes every weight again for every 128-row tile of the batch, inside its inner
  * loop. Decoding once per chunk costs one pass over the weights and runs the GEMM at the FP16 rate.
@@ -34,7 +36,7 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * sixth of its prefill, and its FP16 weights are a few gigabytes.
  */
 // @formatter:on
-public final class Q8DecodedProjections {
+public final class FP16Projections {
 
     /** The FP16 weight bytes up to which every projection keeps a resident decoded copy. */
     public static final long RESIDENT_BYTES = 6L << 30;
@@ -59,20 +61,21 @@ public final class Q8DecodedProjections {
      * @param rows the padded batch, the GEMMs' row count
      * @param widestSplit the widest output a split projection writes
      */
-    public Q8DecodedProjections(
+    public FP16Projections(
             KernelContext context,
             long widest,
             int rows,
             int widestSplit,
             boolean resident,
-            int projectionCalls) {
+            int projectionCalls,
+            boolean nativeGemm) {
         this.context = context;
         this.resident = resident;
         // One flag per resident projection, and a last one never set for the per-chunk decodes.
         this.decoded = new IntArray(projectionCalls + 1);
         this.neverDecoded = projectionCalls;
         this.scratch = new HalfFloatArray(resident ? 1 : Math.toIntExact(widest));
-        this.gemm = new SplitKGemm(context, rows, widestSplit);
+        this.gemm = new SplitKGemm(context, rows, widestSplit, nativeGemm);
     }
 
     /** The buffers, which every layer graph transfers or consumes with its intermediates. */
@@ -101,7 +104,7 @@ public final class Q8DecodedProjections {
         if (resident) {
             long total = 0;
             for (TornadoTensor w : ws) {
-                total += w.asByteArray().getSize() / 34 * 32;
+                total += elements(w);
             }
             b = new HalfFloatArray(Math.toIntExact(total));
             layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, b);
@@ -113,12 +116,20 @@ public final class Q8DecodedProjections {
             if (w.isPacked()) {
                 throw PackedWeights.noPackedKernel("Q8_0 batch-prefill task '" + task + "'");
             }
-            long elements = w.asByteArray().getSize() / 34 * 32;
+            long elements = elements(w);
             total += elements;
             wholeRowBlocks &= (elements / k) % 128 == 0;
         }
         int columns = Math.toIntExact(total / k);
-        if (wholeRowBlocks && m % 128 == 0 && gemm.slices(m, columns, k) == 1) {
+        boolean allQ8 = true;
+        for (TornadoTensor w : ws) {
+            allQ8 &= w.dataType() == DataType.Q8_0;
+        }
+        if (allQ8
+                && !gemm.nativeGemm()
+                && wholeRowBlocks
+                && m % 128 == 0
+                && gemm.slices(m, columns, k) == 1) {
             projectTiled(layer, task, a, c, m, k, b, resident ? flag : neverDecoded, ws);
             return;
         }
@@ -127,10 +138,20 @@ public final class Q8DecodedProjections {
             if (ws[i].isPacked()) {
                 throw PackedWeights.noPackedKernel("Q8_0 batch-prefill task '" + task + "'");
             }
-            // 34 bytes to 32 weights.
-            int n = ws[i].asByteArray().getSize() / 34 * 32;
+            int n = (int) elements(ws[i]);
             String decode = task + "Decode" + i;
-            if (resident) {
+            if (ws[i].dataType() == DataType.F16) {
+                layer.task(
+                        decode,
+                        TransformerBatchPrefillKernels::copyFP16Once,
+                        context,
+                        ws[i].asHalfFloatArray(),
+                        b,
+                        offset,
+                        n,
+                        decoded,
+                        resident ? flag : neverDecoded);
+            } else if (resident) {
                 layer.task(
                         decode,
                         TransformerBatchPrefillKernels::dequantizeQ8_0ToFP16Once,
@@ -151,9 +172,10 @@ public final class Q8DecodedProjections {
                         offset,
                         n);
             }
+            boolean striding = resident || ws[i].dataType() == DataType.F16;
             decodeTasks.put(
                     layer.getTaskGraphName() + "." + decode,
-                    resident ? Math.min(n, TransformerBatchPrefillKernels.DECODE_ONCE_LANES) : n);
+                    striding ? Math.min(n, TransformerBatchPrefillKernels.DECODE_ONCE_LANES) : n);
             offset += n;
         }
         if (resident) {
@@ -162,6 +184,13 @@ public final class Q8DecodedProjections {
             markTasks.add(layer.getTaskGraphName() + "." + mark);
         }
         gemm.gemm(layer, task, a, b, c, m, offset / k, k);
+    }
+
+    /** Weights in {@code w}: FP16, or Q8_0 at 34 bytes to 32 weights. */
+    private static long elements(TornadoTensor w) {
+        return w.dataType() == DataType.F16
+                ? w.asHalfFloatArray().getSize()
+                : (long) w.asByteArray().getSize() / 34 * 32;
     }
 
     /** The tile-order decodes of {@code ws} into {@code b}, then {@code gemmMMATiledB}. */
