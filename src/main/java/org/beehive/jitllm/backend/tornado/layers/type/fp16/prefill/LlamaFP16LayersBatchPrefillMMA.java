@@ -338,16 +338,7 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                     qDim);
         }
 
-        batchPrefillLayer.task(
-                "woProj",
-                TransformerBatchPrefillKernels::gemmMMA,
-                context,
-                state.workspace.attnOutFP16,
-                weights.woLayered[layerIndex].asHalfFloatArray(),
-                state.workspace.woOut,
-                paddedBatch,
-                dim,
-                qDim);
+        attentionOutputProjection(batchPrefillLayer, layerIndex);
         afterAttentionOutputProjection(batchPrefillLayer, layerIndex);
 
         feedForward(batchPrefillLayer, layerIndex);
@@ -462,17 +453,8 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         context,
                         state.workspace.wrapHbFP16Batch,
                         state.workspace.gateUpResultBatch,
-                        hidDim)
-                .task(
-                        "w2Proj",
-                        TransformerBatchPrefillKernels::gemmMMA,
-                        context,
-                        state.workspace.wrapHbFP16Batch,
-                        downWeight(layerIndex).asHalfFloatArray(),
-                        state.workspace.w2Out,
-                        batchSize,
-                        dim,
                         hidDim);
+        downProjection(batchPrefillLayer, layerIndex);
         afterDownProjection(batchPrefillLayer, layerIndex);
         batchPrefillLayer.task(
                 "w2Resid",
@@ -495,6 +477,34 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         scheduler.addWorkerGrid(p + "swiglu", elementwiseGrid(batchSize * hidDim));
         scheduler.addWorkerGrid(p + "w2Proj", mmaGrid(paddedBatch, dim));
         scheduler.addWorkerGrid(p + "w2Resid", elementwiseGrid(batchSize * dim));
+    }
+
+    /** The attention output projection: {@code attnOutFP16} through {@code wo} into {@code woOut}. */
+    protected void attentionOutputProjection(TaskGraph batchPrefillLayer, int layerIndex) {
+        batchPrefillLayer.task(
+                "woProj",
+                TransformerBatchPrefillKernels::gemmMMA,
+                context,
+                state.workspace.attnOutFP16,
+                weights.woLayered[layerIndex].asHalfFloatArray(),
+                state.workspace.woOut,
+                paddedBatch,
+                config.dim(),
+                config.numberOfHeads() * config.headSize());
+    }
+
+    /** The down projection: {@code wrapHbFP16Batch} into {@code w2Out}. */
+    protected void downProjection(TaskGraph batchPrefillLayer, int layerIndex) {
+        batchPrefillLayer.task(
+                "w2Proj",
+                TransformerBatchPrefillKernels::gemmMMA,
+                context,
+                state.workspace.wrapHbFP16Batch,
+                downWeight(layerIndex).asHalfFloatArray(),
+                state.workspace.w2Out,
+                batchSize,
+                config.dim(),
+                config.hiddenDim());
     }
 
     /** Per-layer weights a family adds to the shared projection set, uploaded with it. */
