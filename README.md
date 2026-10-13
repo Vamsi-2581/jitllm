@@ -67,7 +67,7 @@ Grab a ready-to-run model from the [Hugging Face collections](#-model-collection
 jitLLM is growing into a **serving engine** — the vLLM-style path for the JVM:
 
 - 🌐 **OpenAI-compatible server** — `jitllm serve` exposes `/v1/chat/completions` and `/v1/completions` with streaming and zero external dependencies. `/v1/models` reports the served context length, so clients size their prompts instead of guessing. Point any OpenAI client at `localhost`.
-- 🎯 **Tensor-core (MMA) batch prefill** on the CUDA backend, FP16 & Q8_0 — `--with-prefill-decode --batch-prefill-size N`.
+- 🎯 **Tensor-core batch prefill on CUDA for every model family** (F16, Q8_0, Q4_0, Q4_K) — `--with-prefill-decode --batch-prefill-size N`; add `--with-native-libraries` for cuBLAS projections. Llama-3.2-1B Q8_0 prompt processing 4.9k → 27k tok/s on an A100, past llama.cpp. See [Fast prompt processing on CUDA](#fast-prompt-processing-on-cuda).
 - 🍎 **SIMD-group matrix batch prefill on Apple Metal**, on by default for every supported family — e.g. Llama-3.2-1B F16 prompt processing 40 → 2372 tok/s, Qwen3-0.6B F16 4171 tok/s on an M4 Pro.
 - 📈 **llama-bench-style benchmarking** — `jitllm --bench` reports a pp/tg matrix with avg±stddev in md/csv/json/jsonl/sql. See [Running the CLI](#-running-the-cli) for the flag.
 - 🧮 **On-device greedy sampling** *(landing next)* — argmax on the GPU keeps logits device-side, cutting device→host traffic by ~500× per token. ([PR #134](https://github.com/beehive-lab/jitllm/pull/134))
@@ -266,6 +266,40 @@ needs about 13826.6 MiB of device memory but the configured budget is 1024.0 MiB
 
 It is followed by a per-component device memory plan, so you can see what is actually
 consuming the budget before changing anything.
+
+-----------
+
+### Fast prompt processing on CUDA
+
+On an NVIDIA GPU with tensor cores, prefill the prompt in batches and replay the plan as a
+CUDA graph. With `--with-native-libraries` the batched projections run in cuBLAS:
+
+```bash
+./jitllm run --gpu --cuda --cuda-graphs --with-prefill-decode --batch-prefill-size 512 \
+  --with-native-libraries -m Llama-3.2-1B-Instruct-Q8_0.gguf --prompt "..."
+```
+
+Every model family has a batched prefill on CUDA: Llama, Mistral, Qwen2 / DeepSeek-R1-Distill-Qwen,
+Qwen3, Qwen3.5 / 3.6 / 3.8, Phi-3, Granite, Gemma 4, Devstral, Qwen2-MoE and GLM-4.7-Flash.
+Attention runs as tensor-core GEMMs over the FP16 key/value cache; Q8_0, Q4_0 and Q4_K weights are
+decoded to FP16 for the projection GEMMs (kept decoded when the model's FP16 weights fit in 6 GB).
+Decode stays single-token and is usually fastest that way.
+
+Prompt processing on an NVIDIA A100 80GB (pp512, tok/s, best configuration each):
+
+| Model | main (1.0.2) | now | llama.cpp |
+| --- | --- | --- | --- |
+| Llama-3.2-1B Q8_0 | 4,921 | 27,240 | 23,550 |
+| Qwen3-0.6B F16 | 12,308 | 36,222 | 40,522 |
+| Granite-3.2-2B Q8_0 | 58 | 12,526 | 9,814 |
+| Mistral-7B Q8_0 | 35 | 5,377 | 4,600 |
+| Gemma-4-31B Q8_0 | — | 1,424 | 1,021 |
+| Llama-3.3-70B Q4_0 | — | 665 | 556 |
+
+`--with-native-libraries` needs cuBLAS 12: the TornadoVM binding loads `libcublasLt.so.12`. On a
+CUDA 13 machine, put a CUDA 12 cuBLAS (for example the `nvidia-cublas-cu12` wheel's `lib`
+directory) on `LD_LIBRARY_PATH`. Without the flag the same prefill runs on jitllm's own
+tensor-core kernels, about 0.5–0.75× as fast.
 
 -----------
 

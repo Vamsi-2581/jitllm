@@ -185,6 +185,53 @@ batched; greedy text is identical in every row:
 | Qwen3.5-0.8B Q4_0 | 60 | 2057 |
 | Gemma-4-E2B Q8_0 | 69 | 1067 |
 
+On CUDA every family has a batched prefill on the tensor cores: Llama (F16, Q8_0, Q4_0),
+Mistral, Qwen2 / DeepSeek-R1-Distill-Qwen, Qwen3, Phi-3, Granite, Devstral (F16, Q8_0, Q4_K),
+Qwen2-MoE, Gemma 4, Qwen3.5 / 3.6 / 3.8 and deepseek2. It is chosen with
+`--with-prefill-decode --batch-prefill-size N` and needs a tensor-core device; elsewhere it is
+refused with `GPUL-CFG-002`, naming the flag to drop. The Llama-shaped families share
+`LlamaFP16LayersBatchPrefillMMA` and `LlamaQ8_0LayersBatchPrefillMMA`, which a family extends
+through hooks (its weights, its QKV and gate/up projections, what runs after the QKV
+projection, its RoPE) rather than copying the layer graph.
+
+- **Attention** (`TensorCoreBatchAttention`) gathers the layer's paged FP16 cache per key/value
+  head, then runs Q·Kᵀ and P·V as FP16 GEMMs on the tensor cores with a causal softmax between
+  them, a few query heads per pass so the scores fit in 64 MB. A head narrower than the GEMM's
+  128-column tile (64, 96) is computed 128 wide and narrowed on the way to FP16. It needs the
+  FP16 cache; with `--fp32-kv-cache` the scalar flash-attention kernel runs instead, about 4×
+  slower.
+- **Quantized projections** (`FP16Projections`) decode Q8_0 weights to FP16 and multiply them
+  with the FP16 GEMM. Projections wide enough to fill the device are decoded in the tile order
+  `gemmMMATiledB` stages and copied with `cp.async`. When the model's decoded weights fit in
+  6 GB, each projection keeps its own decoded copy, decoded on the first chunk only.
+  `DequantizingFP16LayersBatchPrefillMMA` does the same for Q4_0 / Q4_1 (packed tiles
+  included) and Q4_K / Q6_K, decoding into one shared scratch per chunk.
+- **Narrow projections** (`SplitKGemm`) whose output fills fewer than 128 tiles of 128×128 split
+  their depth into two to four slices and sum the partial products afterwards. The summation
+  order differs from the unsplit GEMM; `-Djitllm.prefill.splitK=false` keeps every GEMM whole.
+- **Native libraries.** With `--with-native-libraries` every one of these GEMMs is
+  `cublasGemmExFP16FP32`; Q, K and V (and gate and up) are stacked into one buffer so one call
+  covers them. The flag is accepted for Llama, Mistral, Qwen2 / DeepSeek, Qwen3, Phi-3 and
+  Granite (Q8_0, F16), Devstral (Q8_0, Q4_K, F16), Gemma 4 (Q8_0, Q4_0) and Qwen3.5 (Q8_0), and
+  refused elsewhere. The TornadoVM binding loads `libcublasLt.so.12`.
+
+Prompt processing on an NVIDIA A100 80GB (pp512, chunk 512, `--cuda-graphs`, tok/s); batched
+greedy text matches single-token text except where noted:
+
+| Model | Single-token | Batched | Batched, native libraries | llama.cpp b11382 |
+| --- | --- | --- | --- | --- |
+| Llama-3.2-1B Q8_0 | 447 | 16,774 | 28,929 | 23,550 |
+| Llama-3.2-1B Q4_0 | 382 | 15,299 | 25,745 | 22,626 |
+| Llama-3.2-1B F16 | 266 | 16,757 | 31,852 | 41,331 |
+| Qwen3-0.6B F16 | — | 23,804 | 36,715 | 40,522 |
+| Qwen2.5-0.5B Q8_0 | — | 23,046 | 33,503 | 31,630 |
+| DeepSeek-R1-Distill-Qwen-1.5B Q8_0 | — | 13,797 | 18,560 | 16,207 |
+| Granite-3.2-2B Q8_0 | — | 7,490 | 13,639 | 9,814 |
+| Phi-3-mini Q8_0 (split-K reorders sums; text drifts after ~20 tokens) | — | 5,384 | 8,870 | 8,234 |
+| Mistral-7B Q8_0 | — | 2,947 | 5,522 | 4,600 |
+| Devstral-24B Q4_K_M | 4.7 | 836 | 1,333 | 1,451 |
+| Llama-3.3-70B Q4_0 | 20 | 324 | 664 | 556 |
+
 `PACKED_HALF2_MATH` is withheld on OpenCL. Packed FP16 arithmetic rounds each product to
 FP16 before the FP32 accumulator sees it, once per term; over a 2048-term projection row
 that loss is systematic rather than cancelling, and on OpenCL it was large enough to fail
@@ -207,7 +254,7 @@ assuming the CUDA result carries over.
 | Model loading, device selection | yes | yes | yes | yes |
 | `STANDARD` single-token decode | yes | yes | yes | yes |
 | Sequential prefill/decode | yes | yes | yes | yes |
-| Batched prefill/decode | yes | yes (F16; Q8_0 blocked, see below) | yes | yes (SIMD-group kernels, FP16 or FP32 cache) |
+| Batched prefill/decode | yes | yes (tensor cores, every family; cuBLAS with `--with-native-libraries`) | yes | yes (SIMD-group kernels, FP16 or FP32 cache) |
 | FP16 key/value cache (the default) | yes | yes | NVIDIA-class devices | yes, except Gemma 4 Q4_0 ([matrix](kv-cache-support.md#metal)) |
 | F16 and Q8_0 weights | yes | yes | yes | yes |
 | Q4_K / Q6_K device residency | n/a | yes | yes | yes |
@@ -230,9 +277,6 @@ Recorded external limitations, each with its named cause:
   Q4_1 tensors. The tensor-core kernels (`gemmMMAQKV` and siblings) remain CUDA-only:
   `TornadoInternalError: unimplemented: MMA instructions only supported for the PTX backend`
   (TornadoVM's message still names PTX, the assembly the CUDA backend emits).
-- **Q8_0 batched prefill on CUDA** — a TornadoVM CUDA address-lowering gap on the Q8_0
-  tensor-core kernel: `TornadoInternalError: unimplemented: address origin unimplemented`
-  in `CUDAAddressLowering.lower`. Reported upstream as beehive-lab/TornadoVM#1057.
 - **Qwen3 on Apple's OpenCL** — `clCreateKernel(processHeadsFlashAttentionSplitKVPaged)
   failed: CL error -48`, in every configuration and both representations. The same model is
   correct on Metal. Apple's OpenCL-over-Metal shim; Linux OpenCL is unaffected.
