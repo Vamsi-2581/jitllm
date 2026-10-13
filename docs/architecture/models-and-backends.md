@@ -213,7 +213,9 @@ projection, its RoPE) rather than copying the layer graph.
   `cublasGemmExFP16FP32`; Q, K and V (and gate and up) are stacked into one buffer so one call
   covers them. The flag is accepted for Llama, Mistral, Qwen2 / DeepSeek, Qwen3, Phi-3 and
   Granite (Q8_0, F16), Devstral (Q8_0, Q4_K, F16), Gemma 4 (Q8_0, Q4_0) and Qwen3.5 (Q8_0), and
-  refused elsewhere. The TornadoVM binding loads `libcublasLt.so.12`.
+  refused elsewhere. The TornadoVM binding loads `libcublasLt.so.12`. For Qwen3 F16 the first
+  chunk's attention runs as a cuDNN fused SDPA when the TornadoVM cuDNN shim is built against
+  cuDNN 9; against cuDNN 8.9 the plan cannot be built and the tensor-core GEMM attention runs.
 
 Prompt processing on an NVIDIA A100 80GB (pp512, chunk 512, `--cuda-graphs`, tok/s); batched
 greedy text matches single-token text except where noted:
@@ -223,7 +225,7 @@ greedy text matches single-token text except where noted:
 | Llama-3.2-1B Q8_0 | 447 | 16,774 | 28,929 | 23,550 |
 | Llama-3.2-1B Q4_0 | 382 | 15,299 | 25,745 | 22,626 |
 | Llama-3.2-1B F16 | 266 | 16,757 | 31,852 | 41,331 |
-| Qwen3-0.6B F16 | — | 23,804 | 36,715 | 40,522 |
+| Qwen3-0.6B F16 (native: cuBLAS + cuDNN 9 attention) | — | 23,804 | 54,355 | 40,522 |
 | Qwen2.5-0.5B Q8_0 | — | 23,046 | 33,503 | 31,630 |
 | DeepSeek-R1-Distill-Qwen-1.5B Q8_0 | — | 13,797 | 18,560 | 16,207 |
 | Granite-3.2-2B Q8_0 | — | 7,490 | 13,639 | 9,814 |

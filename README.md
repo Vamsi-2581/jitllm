@@ -67,7 +67,7 @@ Grab a ready-to-run model from the [Hugging Face collections](#-model-collection
 jitLLM is growing into a **serving engine** — the vLLM-style path for the JVM:
 
 - 🌐 **OpenAI-compatible server** — `jitllm serve` exposes `/v1/chat/completions` and `/v1/completions` with streaming and zero external dependencies. `/v1/models` reports the served context length, so clients size their prompts instead of guessing. Point any OpenAI client at `localhost`.
-- 🎯 **Tensor-core batch prefill on CUDA for every model family** (F16, Q8_0, Q4_0, Q4_K) — `--with-prefill-decode --batch-prefill-size N`; add `--with-native-libraries` for cuBLAS projections. Llama-3.2-1B Q8_0 prompt processing 4.9k → 27k tok/s on an A100, past llama.cpp. See [Fast prompt processing on CUDA](#fast-prompt-processing-on-cuda).
+- 🎯 **Tensor-core batch prefill on CUDA for every model family** (F16, Q8_0, Q4_0, Q4_K) — `--with-prefill-decode --batch-prefill-size N`; add `--with-native-libraries` for cuBLAS projections. Llama-3.2-1B Q8_0 prompt processing 4.9k → 29k tok/s on an A100, past llama.cpp; Qwen3-0.6B F16 54k tok/s with cuDNN attention. See [Fast prompt processing on CUDA](#fast-prompt-processing-on-cuda).
 - 🍎 **SIMD-group matrix batch prefill on Apple Metal**, on by default for every supported family — e.g. Llama-3.2-1B F16 prompt processing 40 → 2372 tok/s, Qwen3-0.6B F16 4171 tok/s on an M4 Pro.
 - 📈 **llama-bench-style benchmarking** — `jitllm --bench` reports a pp/tg matrix with avg±stddev in md/csv/json/jsonl/sql. See [Running the CLI](#-running-the-cli) for the flag.
 - 🧮 **On-device greedy sampling** *(landing next)* — argmax on the GPU keeps logits device-side, cutting device→host traffic by ~500× per token. ([PR #134](https://github.com/beehive-lab/jitllm/pull/134))
@@ -289,16 +289,20 @@ Prompt processing on an NVIDIA A100 80GB (pp512, tok/s, best configuration each)
 
 | Model | main (1.0.2) | now | llama.cpp |
 | --- | --- | --- | --- |
-| Llama-3.2-1B Q8_0 | 4,921 | 27,240 | 23,550 |
-| Qwen3-0.6B F16 | 12,308 | 36,222 | 40,522 |
-| Granite-3.2-2B Q8_0 | 58 | 12,526 | 9,814 |
-| Mistral-7B Q8_0 | 35 | 5,377 | 4,600 |
-| Gemma-4-31B Q8_0 | — | 1,424 | 1,021 |
-| Llama-3.3-70B Q4_0 | — | 665 | 556 |
+| Llama-3.2-1B Q8_0 | 4,921 | 29,004 | 23,550 |
+| Qwen3-0.6B F16 | 12,308 | 54,355 | 40,522 |
+| Granite-3.2-2B Q8_0 | 58 | 13,392 | 9,814 |
+| Mistral-7B Q8_0 | 35 | 5,447 | 4,600 |
+| Gemma-4-31B Q8_0 | — | 1,430 | 1,021 |
+| Llama-3.3-70B Q4_0 | — | 663 | 556 |
 
 `--with-native-libraries` needs cuBLAS 12: the TornadoVM binding loads `libcublasLt.so.12`. On a
 CUDA 13 machine, put a CUDA 12 cuBLAS (for example the `nvidia-cublas-cu12` wheel's `lib`
-directory) on `LD_LIBRARY_PATH`. Without the flag the same prefill runs on jitllm's own
+directory) on `LD_LIBRARY_PATH`. Qwen3 F16 also runs the first prompt chunk's attention in cuDNN when
+cuDNN 9 is present: build TornadoVM's `libtornado-cudnn.so` (`tornado-drivers/cudnn-jni`) against
+cuDNN 9 (for example the `nvidia-cudnn-cu12` wheel) and add its `lib` directory to
+`LD_LIBRARY_PATH`; with cuDNN 8.9 that attention falls back to jitllm's kernels (36k instead of
+54k tok/s for Qwen3-0.6B F16). Without the flag the same prefill runs on jitllm's own
 tensor-core kernels, about 0.5–0.75× as fast.
 
 -----------
