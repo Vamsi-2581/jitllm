@@ -17,6 +17,7 @@ import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
+
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
@@ -261,7 +262,7 @@ public class Qwen3Q8_0FFNLayers
             weights.w2Layered[layerIndex].asByteArray(), // FFN down projection
             weights.w3Layered[layerIndex].asByteArray() // FFN up projection
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
+        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
         if (weightSrc != null) {
             unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
         } else {

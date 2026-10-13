@@ -1,7 +1,7 @@
 package org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill;
 
-import java.util.List;
-import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefillSupport;
+import org.beehive.jitllm.backend.tornado.kernels.MlxPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
@@ -16,12 +16,19 @@ import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
+import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
+
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.mlx.Mlx;
+
+import java.util.List;
+import java.util.stream.IntStream;
 
 /**
  * Batched-prefill transformer-layer TaskGraphs for the Qwen3 FP16 unified batched prefill-decode
@@ -50,6 +57,32 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
     private final List<ImmutableTaskGraph> layerITGs;
     private String lastLayerTaskGraphID;
 
+    /** Whether the projections are MLX GEMMs; see {@link MlxPrefillSupport}. */
+    private final boolean mlx;
+
+    // FP16 operands and products of the MLX GEMMs, shared by every layer (one element when unused).
+    private final HalfFloatArray qkvHalf; // B × (qDim + 2·kvDim)
+    private final HalfFloatArray attnHalf; // B × qDim
+    private final HalfFloatArray outHalf; // B × dim
+    private final HalfFloatArray gateUpHalf; // B × 2·hiddenDim
+    private final HalfFloatArray hbHalf; // B × hiddenDim
+
+    // [q|k|v] and [gate|up] stacked per layer, built once.
+    private final HalfFloatArray[] wqkvCat;
+    private final HalfFloatArray[] w13Cat;
+
+    /** Whether every chunk's attention is MLX's; see {@link MlxPrefillSupport#attention}. */
+    private final boolean sdpa;
+
+    /** Positions the gathered keys and values hold: the context, plus one padded chunk. */
+    private final int sdpaPositions;
+
+    // The MLX attention's operands and output, [head][position][headDim] in FP16.
+    private final HalfFloatArray sdpaQ;
+    private final HalfFloatArray sdpaK;
+    private final HalfFloatArray sdpaV;
+    private final HalfFloatArray sdpaOut;
+
     public Qwen3FP16LayersBatchPrefill(
             Qwen3State state,
             Qwen3TornadoWeights weights,
@@ -66,6 +99,33 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
         this.qDim = nEmbdHeadK * config.numberOfHeads();
         this.kvDim = nEmbdHeadV * nHeadKv;
         this.gqa = config.numberOfHeads() / nHeadKv;
+        this.mlx = mlxProjections(state.executionPolicy());
+        int rows = mlx ? batchSize : 0;
+        this.qkvHalf = new HalfFloatArray(Math.max(1, rows * (qDim + 2 * kvDim)));
+        this.attnHalf = new HalfFloatArray(Math.max(1, rows * qDim));
+        this.outHalf = new HalfFloatArray(Math.max(1, rows * config.dim()));
+        this.gateUpHalf = new HalfFloatArray(Math.max(1, rows * 2 * config.hiddenDim()));
+        this.hbHalf = new HalfFloatArray(Math.max(1, rows * config.hiddenDim()));
+        this.wqkvCat = new HalfFloatArray[mlx ? config.numberOfLayers() : 0];
+        this.w13Cat = new HalfFloatArray[wqkvCat.length];
+        for (int i = 0; i < wqkvCat.length; i++) {
+            wqkvCat[i] =
+                    HalfFloatArray.concat(
+                            weights.wqLayered[i].asHalfFloatArray(),
+                            weights.wkLayered[i].asHalfFloatArray(),
+                            weights.wvLayered[i].asHalfFloatArray());
+            w13Cat[i] =
+                    HalfFloatArray.concat(
+                            weights.w1Layered[i].asHalfFloatArray(),
+                            weights.w3Layered[i].asHalfFloatArray());
+        }
+        this.sdpa = MlxPrefillSupport.attention(state.executionPolicy());
+        int sdpaRows = sdpa ? batchSize : 0;
+        this.sdpaPositions = sdpa ? config.contextLength() + batchSize : 0;
+        this.sdpaQ = new HalfFloatArray(Math.max(1, sdpaRows * qDim));
+        this.sdpaK = new HalfFloatArray(Math.max(1, sdpaPositions * kvDim));
+        this.sdpaV = new HalfFloatArray(Math.max(1, sdpaPositions * kvDim));
+        this.sdpaOut = new HalfFloatArray(Math.max(1, sdpaRows * qDim));
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)
@@ -105,6 +165,19 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
             layer.transferToDevice(
                     DataTransferMode.EVERY_EXECUTION, state.workspace.wrapBlockTable);
             layer.consumeFromDevice("prefillActivation", state.workspace.wrapXBatch);
+            if (mlx) {
+                layer.transferToDevice(
+                        DataTransferMode.FIRST_EXECUTION,
+                        qkvHalf,
+                        attnHalf,
+                        outHalf,
+                        gateUpHalf,
+                        hbHalf);
+            }
+            if (sdpa) {
+                layer.transferToDevice(
+                        DataTransferMode.FIRST_EXECUTION, sdpaQ, sdpaK, sdpaV, sdpaOut);
+            }
         } else {
             String pred = "batchPrefillLayer_" + (layerIndex - 1);
             layer.consumeFromDevice(
@@ -123,22 +196,34 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                     state.workspace.attnScaleBatch,
                     state.workspace.ffnScaleBatch);
             layer.consumeFromDevice(pred, state.workspace.wrapBlockTable);
+            if (mlx) {
+                layer.consumeFromDevice(pred, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf);
+            }
+            if (sdpa) {
+                layer.consumeFromDevice(pred, sdpaQ, sdpaK, sdpaV, sdpaOut);
+            }
+        }
+
+        if (mlx) {
+            addMlxLayer(layer, layerIndex);
+            return layer;
         }
 
         // Per-layer weights: upload once
-        layer.transferToDevice(
-                DataTransferMode.FIRST_EXECUTION,
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                weights.wqLayered[layerIndex].asHalfFloatArray(),
-                weights.wkLayered[layerIndex].asHalfFloatArray(),
-                weights.wvLayered[layerIndex].asHalfFloatArray(),
-                weights.woLayered[layerIndex].asHalfFloatArray(),
-                weights.rms_att_QNormLayered[layerIndex].asFloatArray(),
-                weights.rms_att_KNormLayered[layerIndex].asFloatArray(),
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                weights.w1Layered[layerIndex].asHalfFloatArray(),
-                weights.w2Layered[layerIndex].asHalfFloatArray(),
-                weights.w3Layered[layerIndex].asHalfFloatArray());
+        Object[] layerWeights = {
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.wqLayered[layerIndex].asHalfFloatArray(),
+            weights.wkLayered[layerIndex].asHalfFloatArray(),
+            weights.wvLayered[layerIndex].asHalfFloatArray(),
+            weights.woLayered[layerIndex].asHalfFloatArray(),
+            weights.rms_att_QNormLayered[layerIndex].asFloatArray(),
+            weights.rms_att_KNormLayered[layerIndex].asFloatArray(),
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            weights.w1Layered[layerIndex].asHalfFloatArray(),
+            weights.w2Layered[layerIndex].asHalfFloatArray(),
+            weights.w3Layered[layerIndex].asHalfFloatArray()
+        };
+        layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
 
         // ── Attention Block ────────────────────────────────────────────────────
         layer.task(
@@ -195,6 +280,392 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                 kvDim,
                 config.rmsNormEps());
 
+        if (sdpa) {
+            addMlxAttention(layer, layerIndex, false);
+        } else {
+            addRopeAndAttention(layer, layerIndex);
+        }
+
+        // Output projection: n=qDim (input), d=dim (output)
+        layer.task(
+                "batch_attn_out",
+                tiledGemm()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels
+                                        ::batchedGemmFP16WithResidual
+                                : TransformerBatchPrefillKernels::batchedGemmFP16WithResidual)
+                        : TransformerBatchPrefillKernels::batchedMatVecWithResidual,
+                context,
+                state.workspace.wrapXbBatch,
+                state.workspace.wrapXBatch,
+                weights.woLayered[layerIndex].asHalfFloatArray(),
+                qDim,
+                dim,
+                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
+
+        // ── FFN Block ──────────────────────────────────────────────────────────
+        layer.task(
+                "batch_ffn_rms",
+                TransformerBatchPrefillKernels::batchedFFNRmsReduce,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.ffnScaleBatch,
+                dim,
+                config.rmsNormEps());
+
+        layer.task(
+                "batch_ffn_gate_up",
+                tiledGemm()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels
+                                        ::batchedGemmRmsNormFFNGateUpFP16
+                                : TransformerBatchPrefillKernels::batchedGemmRmsNormFFNGateUpFP16)
+                        : TransformerBatchPrefillKernels::batchedFusedRmsNormFFNGateUp,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.wrapHbBatch,
+                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                state.workspace.ffnScaleBatch,
+                weights.w1Layered[layerIndex].asHalfFloatArray(),
+                weights.w3Layered[layerIndex].asHalfFloatArray(),
+                dim,
+                hidDim,
+                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
+
+        layer.task(
+                "batch_ffn_down",
+                tiledGemm()
+                        ? (simdgroupGemm()
+                                ? TransformerBatchPrefillSimdgroupKernels
+                                        ::batchedGemmFP16WithResidual
+                                : TransformerBatchPrefillKernels::batchedGemmFP16WithResidual)
+                        : TransformerBatchPrefillKernels::batchedMatVecWithResidual,
+                context,
+                state.workspace.wrapHbBatch,
+                state.workspace.wrapXBatch,
+                weights.w2Layered[layerIndex].asHalfFloatArray(),
+                hidDim,
+                dim,
+                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
+
+        layer.persistOnDevice(state.workspace.wrapXBatch, keyCache(), valueCache());
+        if (sdpa) {
+            layer.persistOnDevice(sdpaQ, sdpaK, sdpaV, sdpaOut);
+        }
+
+        return layer;
+    }
+
+    /**
+     * The layer with its four projections as MLX FP16 GEMMs: QKV and gate/up over weights stacked
+     * on the host, then the output and down projections over the model's own. Normalization, RoPE,
+     * attention and the residual connections stay JIT kernels.
+     */
+    private void addMlxLayer(TaskGraph layer, int layerIndex) {
+        int dim = config.dim();
+        int hidDim = config.hiddenDim();
+        int qkvDim = qDim + 2 * kvDim;
+        HalfFloatArray wqkv = wqkvCat[layerIndex];
+        HalfFloatArray w13 = w13Cat[layerIndex];
+        HalfFloatArray wo = weights.woLayered[layerIndex].asHalfFloatArray();
+        HalfFloatArray w2 = weights.w2Layered[layerIndex].asHalfFloatArray();
+        Object[] layerWeights = {
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.rms_att_QNormLayered[layerIndex].asFloatArray(),
+            weights.rms_att_KNormLayered[layerIndex].asFloatArray(),
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            wqkv,
+            wo,
+            w13,
+            w2
+        };
+        layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
+
+        layer.task(
+                "batch_attn_rms",
+                TransformerBatchPrefillKernels::batchedRmsReduce,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.attnScaleBatch,
+                dim,
+                config.rmsNormEps());
+        layer.task(
+                "batch_attn_rms_apply",
+                TransformerBatchPrefillKernels::batchedRmsApplyFP16,
+                context,
+                state.workspace.wrapXbFP16Batch,
+                state.workspace.wrapXBatch,
+                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+                state.workspace.attnScaleBatch,
+                dim);
+        layer.libraryTask(
+                "batch_qkv",
+                Mlx::matmulTransposed,
+                state.workspace.wrapXbFP16Batch,
+                wqkv,
+                qkvHalf,
+                batchSize,
+                dim,
+                qkvDim);
+        layer.task(
+                "batch_qkv_split",
+                MlxPrefillKernels::splitQkv,
+                context,
+                qkvHalf,
+                state.workspace.wrapQBatch,
+                state.workspace.wrapKBatch,
+                state.workspace.wrapVBatch,
+                qDim,
+                kvDim,
+                batchSize * qkvDim);
+        layer.task(
+                "batch_qk_rmsnorm",
+                Qwen3Kernels::batchedFusedQKRmsNorm,
+                context,
+                state.workspace.wrapQBatch,
+                state.workspace.wrapKBatch,
+                weights.rms_att_QNormLayered[layerIndex].asFloatArray(),
+                weights.rms_att_KNormLayered[layerIndex].asFloatArray(),
+                config.numberOfHeads(),
+                nHeadKv,
+                nEmbdHead,
+                qDim,
+                kvDim,
+                config.rmsNormEps());
+        if (sdpa) {
+            addMlxAttention(layer, layerIndex, true);
+        } else {
+            addRopeAndAttention(layer, layerIndex);
+            layer.task(
+                    "batch_attn_half",
+                    MlxPrefillKernels::toHalf,
+                    context,
+                    state.workspace.wrapXbBatch,
+                    attnHalf,
+                    batchSize * qDim);
+        }
+        layer.libraryTask(
+                "batch_attn_out",
+                Mlx::matmulTransposed,
+                attnHalf,
+                wo,
+                outHalf,
+                batchSize,
+                qDim,
+                dim);
+        layer.task(
+                "batch_attn_residual",
+                MlxPrefillKernels::addResidual,
+                context,
+                state.workspace.wrapXBatch,
+                outHalf,
+                batchSize * dim);
+
+        layer.task(
+                "batch_ffn_rms",
+                TransformerBatchPrefillKernels::batchedFFNRmsReduce,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.ffnScaleBatch,
+                dim,
+                config.rmsNormEps());
+        layer.task(
+                "batch_ffn_rms_apply",
+                TransformerBatchPrefillKernels::batchedFFNRmsApplyFP16,
+                context,
+                state.workspace.wrapXbFP16Batch,
+                state.workspace.wrapXBatch,
+                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                state.workspace.ffnScaleBatch,
+                dim);
+        layer.libraryTask(
+                "batch_ffn_gate_up",
+                Mlx::matmulTransposed,
+                state.workspace.wrapXbFP16Batch,
+                w13,
+                gateUpHalf,
+                batchSize,
+                dim,
+                2 * hidDim);
+        layer.task(
+                "batch_ffn_swiglu",
+                MlxPrefillKernels::swiglu,
+                context,
+                gateUpHalf,
+                hbHalf,
+                hidDim,
+                batchSize * hidDim);
+        layer.libraryTask(
+                "batch_ffn_down",
+                Mlx::matmulTransposed,
+                hbHalf,
+                w2,
+                outHalf,
+                batchSize,
+                hidDim,
+                dim);
+        layer.task(
+                "batch_ffn_residual",
+                MlxPrefillKernels::addResidual,
+                context,
+                state.workspace.wrapXBatch,
+                outHalf,
+                batchSize * dim);
+
+        layer.persistOnDevice(
+                state.workspace.wrapXBatch,
+                keyCache(),
+                valueCache(),
+                qkvHalf,
+                attnHalf,
+                outHalf,
+                gateUpHalf,
+                hbHalf);
+        if (sdpa) {
+            layer.persistOnDevice(sdpaQ, sdpaK, sdpaV, sdpaOut);
+        }
+    }
+
+    /**
+     * RoPE with the key/value cache write, then MLX's fused causal attention of the chunk over its
+     * whole context: Q packed {@code [head][token][headDim]} in FP16, and this layer's keys and
+     * values of every position so far gathered from the paged cache. MLX reads the context length
+     * from the start position when the task runs. Its output is unpacked into the output
+     * projection's operand: FP16 for the MLX projection, FP32 {@code xb} for the JIT one.
+     */
+    private void addMlxAttention(TaskGraph layer, int layerIndex, boolean halfOutput) {
+        if (useFp16KVCache()) {
+            layer.task(
+                    "batch_rope_kv",
+                    Qwen3PagedKvKernels::batchedRopeWithKVCacheQwen3FP16Paged,
+                    context,
+                    state.workspace.batchStartPosHolder,
+                    state.workspace.wrapQBatch,
+                    state.workspace.wrapKBatch,
+                    state.workspace.wrapVBatch,
+                    state.workspace.wrapKeyCacheFP16,
+                    state.workspace.wrapValueCacheFP16,
+                    config.ropeTheta(),
+                    kvDim,
+                    nEmbdHead,
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    qDim);
+        } else {
+            layer.task(
+                    "batch_rope_kv",
+                    Qwen3PagedKvKernels::batchedRopeWithKVCacheQwen3Paged,
+                    context,
+                    state.workspace.batchStartPosHolder,
+                    state.workspace.wrapQBatch,
+                    state.workspace.wrapKBatch,
+                    state.workspace.wrapVBatch,
+                    state.workspace.wrapKeyCache,
+                    state.workspace.wrapValueCache,
+                    config.ropeTheta(),
+                    kvDim,
+                    nEmbdHead,
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    qDim);
+        }
+        int heads = config.numberOfHeads();
+        layer.task(
+                "batch_sdpa_pack_q",
+                MlxPrefillKernels::packHeads,
+                context,
+                state.workspace.wrapQBatch,
+                sdpaQ,
+                heads,
+                batchSize,
+                nEmbdHead,
+                batchSize * qDim);
+        if (useFp16KVCache()) {
+            layer.task(
+                    "batch_sdpa_gather_kv",
+                    MlxPrefillKernels::gatherKvFP16,
+                    context,
+                    state.workspace.batchStartPosHolder,
+                    state.workspace.wrapKeyCacheFP16,
+                    state.workspace.wrapValueCacheFP16,
+                    sdpaK,
+                    sdpaV,
+                    state.workspace.wrapBlockTable,
+                    layerIndex,
+                    kvDim,
+                    nEmbdHead,
+                    sdpaPositions,
+                    batchSize,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    sdpaPositions * kvDim);
+        } else {
+            layer.task(
+                    "batch_sdpa_gather_kv",
+                    MlxPrefillKernels::gatherKvFP32,
+                    context,
+                    state.workspace.batchStartPosHolder,
+                    state.workspace.wrapKeyCache,
+                    state.workspace.wrapValueCache,
+                    sdpaK,
+                    sdpaV,
+                    state.workspace.wrapBlockTable,
+                    layerIndex,
+                    kvDim,
+                    nEmbdHead,
+                    sdpaPositions,
+                    batchSize,
+                    state.kvBlockCfg,
+                    state.kvBlockStride,
+                    sdpaPositions * kvDim);
+        }
+        layer.libraryTask(
+                "batch_attention",
+                Mlx::scaledDotProductAttentionCached,
+                sdpaQ,
+                sdpaK,
+                sdpaV,
+                sdpaOut,
+                state.workspace.batchStartPosHolder,
+                1,
+                heads,
+                nHeadKv,
+                batchSize,
+                sdpaPositions,
+                nEmbdHead,
+                (float) (1.0 / Math.sqrt(nEmbdHead)),
+                true);
+        if (halfOutput) {
+            layer.task(
+                    "batch_sdpa_unpack",
+                    MlxPrefillKernels::unpackHeads,
+                    context,
+                    sdpaOut,
+                    attnHalf,
+                    heads,
+                    batchSize,
+                    nEmbdHead,
+                    batchSize * qDim);
+        } else {
+            layer.task(
+                    "batch_sdpa_unpack",
+                    MlxPrefillKernels::unpackHeadsToFloat,
+                    context,
+                    sdpaOut,
+                    state.workspace.wrapXbBatch,
+                    heads,
+                    batchSize,
+                    nEmbdHead,
+                    batchSize * qDim);
+        }
+    }
+
+    /** RoPE with the key/value cache write, then attention over the cache into {@code xb}. */
+    private void addRopeAndAttention(TaskGraph layer, int layerIndex) {
         if (useFp16KVCache()) {
             layer.task(
                     "batch_rope_kv",
@@ -293,75 +764,17 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                     state.kvBlockStride,
                     qDim);
         }
-
-        // Output projection: n=qDim (input), d=dim (output)
-        layer.task(
-                "batch_attn_out",
-                tiledGemm()
-                        ? (simdgroupGemm()
-                                ? TransformerBatchPrefillSimdgroupKernels
-                                        ::batchedGemmFP16WithResidual
-                                : TransformerBatchPrefillKernels::batchedGemmFP16WithResidual)
-                        : TransformerBatchPrefillKernels::batchedMatVecWithResidual,
-                context,
-                state.workspace.wrapXbBatch,
-                state.workspace.wrapXBatch,
-                weights.woLayered[layerIndex].asHalfFloatArray(),
-                qDim,
-                dim,
-                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
-
-        // ── FFN Block ──────────────────────────────────────────────────────────
-        layer.task(
-                "batch_ffn_rms",
-                TransformerBatchPrefillKernels::batchedFFNRmsReduce,
-                context,
-                state.workspace.wrapXBatch,
-                state.workspace.ffnScaleBatch,
-                dim,
-                config.rmsNormEps());
-
-        layer.task(
-                "batch_ffn_gate_up",
-                tiledGemm()
-                        ? (simdgroupGemm()
-                                ? TransformerBatchPrefillSimdgroupKernels
-                                        ::batchedGemmRmsNormFFNGateUpFP16
-                                : TransformerBatchPrefillKernels::batchedGemmRmsNormFFNGateUpFP16)
-                        : TransformerBatchPrefillKernels::batchedFusedRmsNormFFNGateUp,
-                context,
-                state.workspace.wrapXBatch,
-                state.workspace.wrapHbBatch,
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                state.workspace.ffnScaleBatch,
-                weights.w1Layered[layerIndex].asHalfFloatArray(),
-                weights.w3Layered[layerIndex].asHalfFloatArray(),
-                dim,
-                hidDim,
-                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
-
-        layer.task(
-                "batch_ffn_down",
-                tiledGemm()
-                        ? (simdgroupGemm()
-                                ? TransformerBatchPrefillSimdgroupKernels
-                                        ::batchedGemmFP16WithResidual
-                                : TransformerBatchPrefillKernels::batchedGemmFP16WithResidual)
-                        : TransformerBatchPrefillKernels::batchedMatVecWithResidual,
-                context,
-                state.workspace.wrapHbBatch,
-                state.workspace.wrapXBatch,
-                weights.w2Layered[layerIndex].asHalfFloatArray(),
-                hidDim,
-                dim,
-                tiledGemm() ? batchSize : LOCAL_WORK_GROUP_SIZE);
-
-        layer.persistOnDevice(state.workspace.wrapXBatch, keyCache(), valueCache());
-
-        return layer;
     }
 
     // @formatter:on
+
+    /**
+     * Whether this family's projections are MLX GEMMs for a session running {@code policy}. The
+     * decode layers ask the same question to learn which weights these graphs stop uploading.
+     */
+    public static boolean mlxProjections(ExecutionPolicy policy) {
+        return MlxPrefillSupport.projections(policy);
+    }
 
     public void updateGridScheduler(GridScheduler scheduler) {
         int dim = config.dim();
@@ -425,10 +838,37 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
             String p = "batchPrefillLayer_" + i + ".";
             scheduler.addWorkerGrid(p + "batch_attn_rms", rmsWorker);
             scheduler.addWorkerGrid(p + "batch_attn_rms_apply", rmsApplyWorker);
+            if (mlx) {
+                scheduler.addWorkerGrid(p + "batch_qk_rmsnorm", qkRmsNormWorker);
+                scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
+                if (sdpa) {
+                    scheduler.addWorkerGrid(p + "batch_sdpa_pack_q", elementwise(batchSize * qDim));
+                    scheduler.addWorkerGrid(
+                            p + "batch_sdpa_gather_kv", elementwise(sdpaPositions * kvDim));
+                    scheduler.addWorkerGrid(p + "batch_sdpa_unpack", elementwise(batchSize * qDim));
+                } else {
+                    scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+                    scheduler.addWorkerGrid(p + "batch_attn_half", elementwise(batchSize * qDim));
+                }
+                scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);
+                scheduler.addWorkerGrid(p + "batch_ffn_rms_apply", rmsApplyWorker);
+                scheduler.addWorkerGrid(p + "batch_qkv_split", elementwise(batchSize * qkvRows));
+                scheduler.addWorkerGrid(p + "batch_attn_residual", elementwise(batchSize * dim));
+                scheduler.addWorkerGrid(p + "batch_ffn_swiglu", elementwise(batchSize * hidDim));
+                scheduler.addWorkerGrid(p + "batch_ffn_residual", elementwise(batchSize * dim));
+                continue;
+            }
             scheduler.addWorkerGrid(p + "batch_qkv", tiledQkv() ? gemmQkvWorker : qkvWorker);
             scheduler.addWorkerGrid(p + "batch_qk_rmsnorm", qkRmsNormWorker);
             scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
-            scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            if (sdpa) {
+                scheduler.addWorkerGrid(p + "batch_sdpa_pack_q", elementwise(batchSize * qDim));
+                scheduler.addWorkerGrid(
+                        p + "batch_sdpa_gather_kv", elementwise(sdpaPositions * kvDim));
+                scheduler.addWorkerGrid(p + "batch_sdpa_unpack", elementwise(batchSize * qDim));
+            } else {
+                scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            }
             scheduler.addWorkerGrid(
                     p + "batch_attn_out", tiledGemm() ? gemmDimWorker : matVecDimWorker);
             scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);
@@ -437,6 +877,11 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
             scheduler.addWorkerGrid(
                     p + "batch_ffn_down", tiledGemm() ? gemmDimWorker : matVecDimWorker);
         }
+    }
+
+    /** One thread per element, rounded up to whole 256-thread groups. */
+    private static WorkerGrid elementwise(int total) {
+        return WorkerGridFactory.genericWorker((total + 255) / 256 * 256, 256);
     }
 
     private static int findOptimalLocalSize(int size) {

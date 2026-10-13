@@ -8,6 +8,7 @@ import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
 import org.beehive.jitllm.model.devstral.DevstralConfiguration;
+
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
@@ -53,7 +54,7 @@ public class DevstralQ8_0FFNLayers
             weights.w2Layered[layerIndex].asByteArray(),
             weights.w3Layered[layerIndex].asByteArray()
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
+        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
         if (weightSrc != null) {
             unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
         } else {

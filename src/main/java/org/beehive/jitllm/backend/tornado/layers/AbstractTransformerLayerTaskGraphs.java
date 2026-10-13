@@ -1,8 +1,5 @@
 package org.beehive.jitllm.backend.tornado.layers;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.IntStream;
 import org.beehive.jitllm.backend.tornado.device.TornadoDevices;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
@@ -12,12 +9,17 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.Weights;
 import org.beehive.jitllm.model.Configuration;
 import org.beehive.jitllm.runtime.backend.BackendId;
+
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.common.TornadoFunctions;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.IntStream;
 
 /**
  * Abstract base class for all transformer-layer task graph implementations. Extended by model and
@@ -46,6 +48,12 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
      */
     protected final boolean scalarFp16KeyValueReads;
 
+    /**
+     * Whether the batched prefill runs its projections on MLX, which leaves the model's own
+     * projection weights out of the prefill graphs; see {@link #weightSource}.
+     */
+    private final boolean mlxPrefillProjections;
+
     protected AbstractTransformerLayerTaskGraphs(
             String taskGraphName, State state, W weights, C config, SchedulerType schedulerType) {
         super(taskGraphName, state, weights, config);
@@ -54,6 +62,9 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
         this.weights = weights;
         this.config = config;
         this.schedulerType = schedulerType;
+        this.mlxPrefillProjections =
+                org.beehive.jitllm.backend.tornado.MlxPrefillSupport.projections(
+                        state.executionPolicy());
         // the ffnLayerITGs is initialized on subclasses
         // due to some model-specific values (i.e. in Qwen3)
     }
@@ -270,5 +281,14 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
         return useFp16KVCache()
                 && !packedHalf2Attention
                 && LaneAttentionPolicy.laneCooperativeAttention(headSize);
+    }
+
+    /**
+     * {@code source}, the graph this layer's weights would be bound from, or null when the batched
+     * prefill's projections are MLX's: its graphs then upload MLX's own forms of the projection
+     * weights and not the model's, so this graph uploads its weights itself.
+     */
+    protected final String weightSource(String source) {
+        return mlxPrefillProjections ? null : source;
     }
 }

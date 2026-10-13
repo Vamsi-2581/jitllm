@@ -14,6 +14,7 @@ import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
 import org.beehive.jitllm.model.llama.LlamaConfiguration;
 import org.beehive.jitllm.runtime.tensor.DataType;
+
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
@@ -133,7 +134,7 @@ public class LlamaQ4_0FFNLayers extends LlamaQ8_0FFNLayers {
             weights.w2Layered[layerIndex],
             weights.w3Layered[layerIndex]
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
+        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
         if (weightSrc != null) {
             unifiedLayer.consumeFromDevice(
                     weightSrc,

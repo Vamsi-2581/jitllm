@@ -1,7 +1,5 @@
 package org.beehive.jitllm.backend.tornado.layers.type.fp16;
 
-import java.util.ArrayList;
-import java.util.List;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
@@ -19,10 +17,14 @@ import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
+
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Qwen3FP16FFNLayers: FP16 transformer-layer TaskGraphs for Qwen3 with Group Query Attention (GQA)
@@ -332,7 +334,7 @@ public class Qwen3FP16FFNLayers
             weights.w2Layered[layerIndex].asHalfFloatArray(), // FFN down
             weights.w3Layered[layerIndex].asHalfFloatArray() // FFN up
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
+        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
         if (weightSrc != null) {
             // consumeFromDevice only aliases a buffer the producer graph really has. TornadoVM
             // builds a graph out of its tasks' argument lists, so a weight the producer declares

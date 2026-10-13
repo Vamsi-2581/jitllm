@@ -1,0 +1,418 @@
+package org.beehive.jitllm.backend.tornado.layers;
+
+import org.beehive.jitllm.backend.tornado.MlxPrefillSupport;
+import org.beehive.jitllm.backend.tornado.kernels.MlxPrefillKernels;
+import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
+import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
+import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
+import org.beehive.jitllm.inference.state.State;
+import org.beehive.jitllm.inference.weights.tornado.TornadoWeights;
+import org.beehive.jitllm.runtime.tensor.DataType;
+
+import uk.ac.manchester.tornado.api.GridScheduler;
+import uk.ac.manchester.tornado.api.KernelContext;
+import uk.ac.manchester.tornado.api.TaskGraph;
+import uk.ac.manchester.tornado.api.WorkerGrid;
+import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+import uk.ac.manchester.tornado.api.types.HalfFloat;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.IntArray;
+import uk.ac.manchester.tornado.mlx.Mlx;
+
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.ArrayList;
+import java.util.List;
+
+// @formatter:off
+/**
+ * The four batched-prefill projections of a Llama-style layer as MLX GEMMs, for any family whose
+ * layer reads {@code wrapXBatch}, projects into {@code wrapQBatch}/{@code wrapKBatch}/{@code
+ * wrapVBatch}, attends into {@code wrapXbBatch} and adds the output and down projections back into
+ * {@code wrapXBatch}.
+ *
+ * <p>Q, K and V, and gate and up, are stacked so each pair or triple is one GEMM. F16 weights run
+ * through {@link Mlx#matmulTransposed}. Q8_0 and Q4_0 weights are repacked once, on the host, into
+ * MLX's affine format with groups of 32 and run through {@link Mlx#quantizedMatmul}; the conversion
+ * is exact: Q8_0's {@code s * q} is {@code s * (q + 128) - 128 * s}, and Q4_0's {@code s * (q - 8)}
+ * is {@code s * q - 8 * s}.
+ *
+ * <p>The family keeps its RMS reductions ({@code batch_attn_rms}, {@code batch_ffn_rms}), RoPE and
+ * attention; this replaces the RMS applies and the projection tasks around them. The FP16 operands
+ * and products are shared by every layer graph: the first declares them, each later one binds them
+ * from its predecessor.
+ */
+// @formatter:on
+public final class MlxPrefillProjections {
+
+    private static final int GROUP = 32;
+
+    /**
+     * {@code -Djitllm.mlx.fp16Weights=true}: decode Q8_0 and Q4_0 weights once into resident FP16
+     * copies and run every projection as an FP16 GEMM, instead of MLX's quantized matmul over the
+     * repacked weights. Costs the FP16 size of the projections in memory.
+     */
+    private static final boolean FP16_WEIGHTS = Boolean.getBoolean("jitllm.mlx.fp16Weights");
+
+    /** One projection's weights in MLX's form: FP16, or affine-quantized. */
+    private record Matrix(
+            HalfFloatArray fp16,
+            IntArray q,
+            HalfFloatArray scales,
+            HalfFloatArray biases,
+            int bits) {
+
+        Object[] arrays() {
+            return fp16 != null ? new Object[] {fp16} : new Object[] {q, scales, biases};
+        }
+    }
+
+    private final State state;
+    private final TornadoWeights weights;
+    private final KernelContext context;
+    private final int batchSize;
+    private final int dim;
+    private final int qDim;
+    private final int kvDim;
+    private final int hidden;
+    private final Matrix[] qkv;
+    private final Matrix[] wo;
+    private final Matrix[] gateUp;
+    private final Matrix[] w2;
+
+    private final HalfFloatArray xHalf; // B × dim
+    private final HalfFloatArray qkvHalf; // B × (qDim + 2·kvDim)
+    private final HalfFloatArray attnHalf; // B × qDim
+    private final HalfFloatArray outHalf; // B × dim
+    private final HalfFloatArray gateUpHalf; // B × 2·hidden
+    private final HalfFloatArray hbHalf; // B × hidden
+
+    /**
+     * The projections for a session running {@code state}'s policy, or null when they are not MLX's
+     * ({@link MlxPrefillSupport#projections}) or the weights are in a form MLX does not take
+     * (packed tiles, or a type other than F16, Q8_0 and Q4_0).
+     */
+    public static MlxPrefillProjections ifEnabled(
+            State state,
+            TornadoWeights weights,
+            KernelContext context,
+            int batchSize,
+            int layers,
+            int dim,
+            int qDim,
+            int kvDim,
+            int hidden) {
+        if (!MlxPrefillSupport.projections(state.executionPolicy())) {
+            return null;
+        }
+        for (int i = 0; i < layers; i++) {
+            for (TornadoTensor t :
+                    new TornadoTensor[] {
+                        weights.wqLayered[i],
+                        weights.wkLayered[i],
+                        weights.wvLayered[i],
+                        weights.woLayered[i],
+                        weights.w1Layered[i],
+                        weights.w2Layered[i],
+                        weights.w3Layered[i]
+                    }) {
+                DataType type = t.dataType();
+                if (t.isPacked()
+                        || (type != DataType.F16
+                                && type != DataType.Q8_0
+                                && type != DataType.Q4_0)) {
+                    return null;
+                }
+            }
+        }
+        return new MlxPrefillProjections(
+                state, weights, context, batchSize, layers, dim, qDim, kvDim, hidden);
+    }
+
+    private MlxPrefillProjections(
+            State state,
+            TornadoWeights weights,
+            KernelContext context,
+            int batchSize,
+            int layers,
+            int dim,
+            int qDim,
+            int kvDim,
+            int hidden) {
+        this.state = state;
+        this.weights = weights;
+        this.context = context;
+        this.batchSize = batchSize;
+        this.dim = dim;
+        this.qDim = qDim;
+        this.kvDim = kvDim;
+        this.hidden = hidden;
+        this.qkv = new Matrix[layers];
+        this.wo = new Matrix[layers];
+        this.gateUp = new Matrix[layers];
+        this.w2 = new Matrix[layers];
+        for (int i = 0; i < layers; i++) {
+            qkv[i] = matrix(dim, weights.wqLayered[i], weights.wkLayered[i], weights.wvLayered[i]);
+            wo[i] = matrix(qDim, weights.woLayered[i]);
+            gateUp[i] = matrix(dim, weights.w1Layered[i], weights.w3Layered[i]);
+            w2[i] = matrix(hidden, weights.w2Layered[i]);
+        }
+        this.xHalf = new HalfFloatArray(batchSize * dim);
+        this.qkvHalf = new HalfFloatArray(batchSize * (qDim + 2 * kvDim));
+        this.attnHalf = new HalfFloatArray(batchSize * qDim);
+        this.outHalf = new HalfFloatArray(batchSize * dim);
+        this.gateUpHalf = new HalfFloatArray(batchSize * 2 * hidden);
+        this.hbHalf = new HalfFloatArray(batchSize * hidden);
+    }
+
+    /** The tensors, rows stacked in order, as one matrix of {@code k} columns. */
+    private static Matrix matrix(int k, TornadoTensor... tensors) {
+        DataType type = tensors[0].dataType();
+        for (TornadoTensor t : tensors) {
+            if (t.dataType() != type) {
+                throw new IllegalArgumentException("MLX projections stack one weight type");
+            }
+        }
+        if (type == DataType.F16) {
+            HalfFloatArray[] parts = new HalfFloatArray[tensors.length];
+            for (int i = 0; i < parts.length; i++) {
+                parts[i] = tensors[i].asHalfFloatArray();
+            }
+            return new Matrix(
+                    parts.length == 1 ? parts[0] : HalfFloatArray.concat(parts),
+                    null,
+                    null,
+                    null,
+                    16);
+        }
+        boolean q8 = type == DataType.Q8_0;
+        if (FP16_WEIGHTS) {
+            return new Matrix(decode(q8, tensors), null, null, null, 16);
+        }
+        int bits = q8 ? 8 : 4;
+        int blockBytes = q8 ? 34 : 18;
+        long blocks = 0;
+        for (TornadoTensor t : tensors) {
+            blocks += t.asByteArray().getSize() / blockBytes;
+        }
+        IntArray q = new IntArray(Math.toIntExact(blocks * GROUP * bits / 32));
+        HalfFloatArray scales = new HalfFloatArray(Math.toIntExact(blocks));
+        HalfFloatArray biases = new HalfFloatArray(Math.toIntExact(blocks));
+        int word = 0;
+        int group = 0;
+        int[] values = new int[GROUP];
+        for (TornadoTensor t : tensors) {
+            MemorySegment src = t.asByteArray().getSegment();
+            long n = t.asByteArray().getSize() / blockBytes;
+            for (long b = 0; b < n; b++) {
+                long base = b * blockBytes;
+                float scale = Float.float16ToFloat(src.get(ValueLayout.JAVA_SHORT_UNALIGNED, base));
+                if (q8) {
+                    for (int j = 0; j < GROUP; j++) {
+                        values[j] = src.get(ValueLayout.JAVA_BYTE, base + 2 + j) + 128;
+                    }
+                } else {
+                    for (int j = 0; j < GROUP / 2; j++) {
+                        int packed = src.get(ValueLayout.JAVA_BYTE, base + 2 + j) & 0xFF;
+                        values[j] = packed & 0xF;
+                        values[j + GROUP / 2] = packed >>> 4;
+                    }
+                }
+                int perWord = 32 / bits;
+                for (int w = 0; w < GROUP / perWord; w++) {
+                    int packed = 0;
+                    for (int e = 0; e < perWord; e++) {
+                        packed |= values[w * perWord + e] << (e * bits);
+                    }
+                    q.set(word++, packed);
+                }
+                scales.set(group, new HalfFloat(scale));
+                biases.set(group, new HalfFloat(-(q8 ? 128 : 8) * scale));
+                group++;
+            }
+        }
+        return new Matrix(null, q, scales, biases, bits);
+    }
+
+    /** The Q8_0 or Q4_0 tensors, rows stacked in order, decoded to FP16. */
+    private static HalfFloatArray decode(boolean q8, TornadoTensor... tensors) {
+        int blockBytes = q8 ? 34 : 18;
+        long blocks = 0;
+        for (TornadoTensor t : tensors) {
+            blocks += t.asByteArray().getSize() / blockBytes;
+        }
+        HalfFloatArray out = new HalfFloatArray(Math.toIntExact(blocks * GROUP));
+        MemorySegment dst = out.getSegment();
+        long e = 0;
+        for (TornadoTensor t : tensors) {
+            MemorySegment src = t.asByteArray().getSegment();
+            long n = t.asByteArray().getSize() / blockBytes;
+            for (long b = 0; b < n; b++, e += GROUP) {
+                long base = b * blockBytes;
+                float scale = Float.float16ToFloat(src.get(ValueLayout.JAVA_SHORT_UNALIGNED, base));
+                for (int j = 0; j < GROUP; j++) {
+                    int q;
+                    if (q8) {
+                        q = src.get(ValueLayout.JAVA_BYTE, base + 2 + j);
+                    } else {
+                        int packed = src.get(ValueLayout.JAVA_BYTE, base + 2 + (j % 16)) & 0xFF;
+                        q = (j < 16 ? packed & 0xF : packed >>> 4) - 8;
+                    }
+                    dst.set(
+                            ValueLayout.JAVA_SHORT_UNALIGNED,
+                            (e + j) * 2,
+                            Float.floatToFloat16(scale * q));
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Declares the shared FP16 buffers and this layer's weights in layer graph {@code layerIndex}.
+     */
+    public void declare(TaskGraph layer, int layerIndex, String predecessor) {
+        Object[] buffers = {xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf};
+        if (layerIndex == 0) {
+            layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, buffers);
+        } else {
+            layer.consumeFromDevice(predecessor, buffers);
+        }
+        List<Object> layerWeights = new ArrayList<>();
+        for (Matrix m :
+                new Matrix[] {
+                    qkv[layerIndex], wo[layerIndex], gateUp[layerIndex], w2[layerIndex]
+                }) {
+            layerWeights.addAll(List.of(m.arrays()));
+        }
+        layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights.toArray());
+    }
+
+    /**
+     * The attention input: RMS apply (after the family's {@code batch_attn_rms}) into FP16, the
+     * stacked QKV GEMM, and its split into {@code wrapQBatch}, {@code wrapKBatch}, {@code
+     * wrapVBatch}.
+     */
+    public void qkv(TaskGraph layer, int layerIndex) {
+        layer.task(
+                "batch_attn_rms_apply",
+                TransformerBatchPrefillKernels::batchedRmsApplyFP16,
+                context,
+                xHalf,
+                state.workspace.wrapXBatch,
+                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+                state.workspace.attnScaleBatch,
+                dim);
+        gemm(layer, "batch_qkv", xHalf, qkv[layerIndex], qkvHalf, dim, qDim + 2 * kvDim);
+        layer.task(
+                "batch_qkv_split",
+                MlxPrefillKernels::splitQkv,
+                context,
+                qkvHalf,
+                state.workspace.wrapQBatch,
+                state.workspace.wrapKBatch,
+                state.workspace.wrapVBatch,
+                qDim,
+                kvDim,
+                batchSize * (qDim + 2 * kvDim));
+    }
+
+    /** The output projection of {@code wrapXbBatch}, added into {@code wrapXBatch}. */
+    public void attentionOutput(TaskGraph layer, int layerIndex) {
+        layer.task(
+                "batch_attn_half",
+                MlxPrefillKernels::toHalf,
+                context,
+                state.workspace.wrapXbBatch,
+                attnHalf,
+                batchSize * qDim);
+        gemm(layer, "batch_attn_out", attnHalf, wo[layerIndex], outHalf, qDim, dim);
+        layer.task(
+                "batch_attn_residual",
+                MlxPrefillKernels::addResidual,
+                context,
+                state.workspace.wrapXBatch,
+                outHalf,
+                batchSize * dim);
+    }
+
+    /**
+     * The feed-forward block after the family's {@code batch_ffn_rms}: RMS apply into FP16, the
+     * stacked gate/up GEMM, SwiGLU, and the down GEMM added into {@code wrapXBatch}.
+     */
+    public void ffn(TaskGraph layer, int layerIndex) {
+        layer.task(
+                "batch_ffn_rms_apply",
+                TransformerBatchPrefillKernels::batchedFFNRmsApplyFP16,
+                context,
+                xHalf,
+                state.workspace.wrapXBatch,
+                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+                state.workspace.ffnScaleBatch,
+                dim);
+        gemm(layer, "batch_ffn_gate_up", xHalf, gateUp[layerIndex], gateUpHalf, dim, 2 * hidden);
+        layer.task(
+                "batch_ffn_swiglu",
+                MlxPrefillKernels::swiglu,
+                context,
+                gateUpHalf,
+                hbHalf,
+                hidden,
+                batchSize * hidden);
+        gemm(layer, "batch_ffn_down", hbHalf, w2[layerIndex], outHalf, hidden, dim);
+        layer.task(
+                "batch_ffn_residual",
+                MlxPrefillKernels::addResidual,
+                context,
+                state.workspace.wrapXBatch,
+                outHalf,
+                batchSize * dim);
+    }
+
+    private void gemm(
+            TaskGraph layer,
+            String task,
+            HalfFloatArray x,
+            Matrix w,
+            HalfFloatArray y,
+            int k,
+            int n) {
+        if (w.fp16() != null) {
+            layer.libraryTask(task, Mlx::matmulTransposed, x, w.fp16(), y, batchSize, k, n);
+        } else {
+            layer.libraryTask(
+                    task,
+                    Mlx::quantizedMatmul,
+                    x,
+                    w.q(),
+                    w.scales(),
+                    w.biases(),
+                    y,
+                    batchSize,
+                    k,
+                    n,
+                    GROUP,
+                    w.bits());
+        }
+    }
+
+    /** Keeps the shared buffers on the device for the next layer graph. */
+    public void persist(TaskGraph layer) {
+        layer.persistOnDevice(xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf);
+    }
+
+    /** The grids of this helper's kernels, under graph-qualified prefix {@code p}. */
+    public void addGrids(GridScheduler scheduler, String p) {
+        scheduler.addWorkerGrid(p + "batch_attn_rms_apply", elementwise(batchSize * dim));
+        scheduler.addWorkerGrid(p + "batch_qkv_split", elementwise(batchSize * (qDim + 2 * kvDim)));
+        scheduler.addWorkerGrid(p + "batch_attn_half", elementwise(batchSize * qDim));
+        scheduler.addWorkerGrid(p + "batch_attn_residual", elementwise(batchSize * dim));
+        scheduler.addWorkerGrid(p + "batch_ffn_rms_apply", elementwise(batchSize * dim));
+        scheduler.addWorkerGrid(p + "batch_ffn_swiglu", elementwise(batchSize * hidden));
+        scheduler.addWorkerGrid(p + "batch_ffn_residual", elementwise(batchSize * dim));
+    }
+
+    private static WorkerGrid elementwise(int total) {
+        return WorkerGridFactory.genericWorker((total + 255) / 256 * 256, 256);
+    }
+}

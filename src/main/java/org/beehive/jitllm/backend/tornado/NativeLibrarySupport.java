@@ -1,6 +1,5 @@
 package org.beehive.jitllm.backend.tornado;
 
-import java.util.Optional;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.plan.ExecutionMode;
 import org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry;
@@ -8,6 +7,9 @@ import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.diagnostics.DiagnosticCode;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
+import org.beehive.jitllm.runtime.tensor.DataType;
+
+import java.util.Optional;
 
 /**
  * Where vendor native libraries ({@code --with-native-libraries}) have an implementation.
@@ -30,8 +32,11 @@ public final class NativeLibrarySupport {
         if (BackendId.CPU.equals(c.backend())) {
             return Optional.of("the CPU path has no native-library implementation");
         }
+        if (BackendId.METAL.equals(c.backend())) {
+            return unsupportedOnMetal(c);
+        }
         if (!BackendId.CUDA.equals(c.backend())) {
-            return Optional.of("native libraries are implemented on CUDA only");
+            return Optional.of("native libraries are implemented on CUDA and Metal only");
         }
         boolean implemented =
                 TornadoPlanRegistry.provider(c.architecture())
@@ -58,6 +63,36 @@ public final class NativeLibrarySupport {
         return Optional.empty();
     }
 
+    /** The families whose Metal batched prefill runs its attention on MLX. */
+    private static final java.util.Set<String> MLX_ATTENTION_FAMILIES =
+            java.util.Set.of("llama", "qwen2", "qwen3", "deepseek-r1-distill-qwen");
+
+    /** The weight types those families' Metal batched prefill is implemented for. */
+    private static final java.util.Set<DataType> MLX_WEIGHTS =
+            java.util.EnumSet.of(DataType.F16, DataType.Q8_0, DataType.Q4_0);
+
+    /**
+     * On Metal, MLX runs batched-prefill attention for the families above, and the projections too
+     * where {@link MlxPrefillSupport#projections} reaches them; see {@link MlxPrefillSupport}.
+     */
+    private static Optional<String> unsupportedOnMetal(Combination c) {
+        if (!MLX_ATTENTION_FAMILIES.contains(c.architecture())
+                || !MLX_WEIGHTS.contains(c.weights())) {
+            return Optional.of(
+                    "on Metal, MLX is implemented for "
+                            + MLX_ATTENTION_FAMILIES
+                            + " with "
+                            + MLX_WEIGHTS
+                            + " weights only");
+        }
+        if (c.mode() != ExecutionMode.BATCH_PREFILL_DECODE) {
+            return Optional.of(
+                    "MLX replaces batched-prefill projections only; add"
+                            + " --with-prefill-decode --batch-prefill-size N");
+        }
+        return Optional.empty();
+    }
+
     /**
      * Refuses a native-library request the resolved configuration does not implement.
      *
@@ -69,7 +104,11 @@ public final class NativeLibrarySupport {
         }
         Combination combination = Fp16KeyValueSupport.resolve(model, policy, gpu);
         Optional<String> reason = unsupported(combination);
-        if (reason.isEmpty() && !NativePrefillSupport.cublasAvailable()) {
+        if (reason.isEmpty() && BackendId.METAL.equals(combination.backend())) {
+            if (!MlxPrefillSupport.available()) {
+                reason = Optional.of("MLX's mlx.metallib could not be loaded in this process");
+            }
+        } else if (reason.isEmpty() && !NativePrefillSupport.cublasAvailable()) {
             reason = Optional.of("cuBLAS could not be loaded in this process");
         }
         reason.ifPresent(
