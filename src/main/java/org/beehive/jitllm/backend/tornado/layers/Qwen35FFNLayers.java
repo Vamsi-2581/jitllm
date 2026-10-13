@@ -1130,11 +1130,11 @@ public class Qwen35FFNLayers
      *
      * <p>The device's own maximum is an upper bound for a kernel, not a promise to every kernel: a
      * kernel's real limit is fixed when the driver compiles it, from the registers it ends up
-     * using, and TornadoVM compiles after the geometry is chosen. The eight-part kernel's
-     * 1024-lane launch was refused on NVIDIA through OpenCL ({@code CL_OUT_OF_RESOURCES}) and on
-     * an A100 through CUDA ({@code CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES}), on every recurrent layer.
-     * So every backend is capped at {@link #PORTABLE_SPLIT_WORKGROUP}, which admits the two-part
-     * kernel for this family's 128-wide value head.
+     * using, and TornadoVM compiles after the geometry is chosen. The eight-part kernel's 1024-lane
+     * launch was refused on NVIDIA through OpenCL ({@code CL_OUT_OF_RESOURCES}) and on an A100
+     * through CUDA ({@code CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES}), on every recurrent layer. So every
+     * backend is capped at {@link #PORTABLE_SPLIT_WORKGROUP}, which admits the two-part kernel for
+     * this family's 128-wide value head.
      */
     // @formatter:on
     public static long deltaRuleWorkGroupLimit(org.beehive.jitllm.runtime.backend.Device device) {
