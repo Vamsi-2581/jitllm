@@ -52,12 +52,12 @@ public final class MlxPrefillKernels {
         }
     }
 
-    /** {@code x[i] += y[i]}: the residual connection after a projection. */
+    /** {@code x[i] += scale * y[i]}: the residual connection after a projection. */
     public static void addResidual(
-            KernelContext context, FloatArray x, HalfFloatArray y, int total) {
+            KernelContext context, FloatArray x, HalfFloatArray y, float scale, int total) {
         int id = context.globalIdx;
         if (id < total) {
-            x.set(id, x.get(id) + y.get(id).getFloat32());
+            x.set(id, x.get(id) + scale * y.get(id).getFloat32());
         }
     }
 

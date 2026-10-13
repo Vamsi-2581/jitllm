@@ -65,7 +65,14 @@ public final class NativeLibrarySupport {
 
     /** The families whose Metal batched prefill runs its attention on MLX. */
     private static final java.util.Set<String> MLX_ATTENTION_FAMILIES =
-            java.util.Set.of("llama", "qwen2", "qwen3", "deepseek-r1-distill-qwen");
+            java.util.Set.of(
+                    "llama",
+                    "mistral",
+                    "granite",
+                    "phi3",
+                    "qwen2",
+                    "qwen3",
+                    "deepseek-r1-distill-qwen");
 
     /** The weight types those families' Metal batched prefill is implemented for. */
     private static final java.util.Set<DataType> MLX_WEIGHTS =

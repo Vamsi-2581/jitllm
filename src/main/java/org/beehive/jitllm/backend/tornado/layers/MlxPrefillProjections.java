@@ -75,6 +75,7 @@ public final class MlxPrefillProjections {
     private final int qDim;
     private final int kvDim;
     private final int hidden;
+    private final float residualScale;
     private final Matrix[] qkv;
     private final Matrix[] wo;
     private final Matrix[] gateUp;
@@ -88,9 +89,37 @@ public final class MlxPrefillProjections {
     private final HalfFloatArray hbHalf; // B × hidden
 
     /**
-     * The projections for a session running {@code state}'s policy, or null when they are not MLX's
-     * ({@link MlxPrefillSupport#projections}) or the weights are in a form MLX does not take
-     * (packed tiles, or a type other than F16, Q8_0 and Q4_0).
+     * One layer's projection weights: Q, K and V (one fused tensor, or three stacked in that
+     * order), the output projection, gate and up (fused, or stacked in that order) and the down
+     * projection.
+     */
+    public record LayerWeights(
+            TornadoTensor[] qkv, TornadoTensor wo, TornadoTensor[] gateUp, TornadoTensor w2) {
+
+        /** The Llama-style layer: separate Q, K, V, gate and up tensors. */
+        static LayerWeights of(TornadoWeights weights, int i) {
+            return new LayerWeights(
+                    new TornadoTensor[] {
+                        weights.wqLayered[i], weights.wkLayered[i], weights.wvLayered[i]
+                    },
+                    weights.woLayered[i],
+                    new TornadoTensor[] {weights.w1Layered[i], weights.w3Layered[i]},
+                    weights.w2Layered[i]);
+        }
+
+        List<TornadoTensor> all() {
+            List<TornadoTensor> all = new ArrayList<>(List.of(qkv));
+            all.add(wo);
+            all.addAll(List.of(gateUp));
+            all.add(w2);
+            return all;
+        }
+    }
+
+    /**
+     * The projections of a Llama-style layer for a session running {@code state}'s policy, or null
+     * when they are not MLX's ({@link MlxPrefillSupport#projections}) or the weights are in a form
+     * MLX does not take (packed tiles, or a type other than F16, Q8_0 and Q4_0).
      */
     public static MlxPrefillProjections ifEnabled(
             State state,
@@ -102,20 +131,44 @@ public final class MlxPrefillProjections {
             int qDim,
             int kvDim,
             int hidden) {
+        return ifEnabled(
+                state,
+                weights,
+                context,
+                batchSize,
+                layers,
+                dim,
+                qDim,
+                kvDim,
+                hidden,
+                1.0f,
+                i -> LayerWeights.of(weights, i));
+    }
+
+    /**
+     * {@link #ifEnabled(State, TornadoWeights, KernelContext, int, int, int, int, int, int)} for a
+     * family whose layer weights {@code layerWeights} supplies, and whose projections are added
+     * into the residual stream scaled by {@code residualScale}.
+     */
+    public static MlxPrefillProjections ifEnabled(
+            State state,
+            TornadoWeights weights,
+            KernelContext context,
+            int batchSize,
+            int layers,
+            int dim,
+            int qDim,
+            int kvDim,
+            int hidden,
+            float residualScale,
+            java.util.function.IntFunction<LayerWeights> layerWeights) {
         if (!MlxPrefillSupport.projections(state.executionPolicy())) {
             return null;
         }
+        LayerWeights[] perLayer = new LayerWeights[layers];
         for (int i = 0; i < layers; i++) {
-            for (TornadoTensor t :
-                    new TornadoTensor[] {
-                        weights.wqLayered[i],
-                        weights.wkLayered[i],
-                        weights.wvLayered[i],
-                        weights.woLayered[i],
-                        weights.w1Layered[i],
-                        weights.w2Layered[i],
-                        weights.w3Layered[i]
-                    }) {
+            perLayer[i] = layerWeights.apply(i);
+            for (TornadoTensor t : perLayer[i].all()) {
                 DataType type = t.dataType();
                 if (t.isPacked()
                         || (type != DataType.F16
@@ -126,7 +179,16 @@ public final class MlxPrefillProjections {
             }
         }
         return new MlxPrefillProjections(
-                state, weights, context, batchSize, layers, dim, qDim, kvDim, hidden);
+                state,
+                weights,
+                context,
+                batchSize,
+                dim,
+                qDim,
+                kvDim,
+                hidden,
+                residualScale,
+                perLayer);
     }
 
     private MlxPrefillProjections(
@@ -134,11 +196,12 @@ public final class MlxPrefillProjections {
             TornadoWeights weights,
             KernelContext context,
             int batchSize,
-            int layers,
             int dim,
             int qDim,
             int kvDim,
-            int hidden) {
+            int hidden,
+            float residualScale,
+            LayerWeights[] perLayer) {
         this.state = state;
         this.weights = weights;
         this.context = context;
@@ -147,15 +210,17 @@ public final class MlxPrefillProjections {
         this.qDim = qDim;
         this.kvDim = kvDim;
         this.hidden = hidden;
+        this.residualScale = residualScale;
+        int layers = perLayer.length;
         this.qkv = new Matrix[layers];
         this.wo = new Matrix[layers];
         this.gateUp = new Matrix[layers];
         this.w2 = new Matrix[layers];
         for (int i = 0; i < layers; i++) {
-            qkv[i] = matrix(dim, weights.wqLayered[i], weights.wkLayered[i], weights.wvLayered[i]);
-            wo[i] = matrix(qDim, weights.woLayered[i]);
-            gateUp[i] = matrix(dim, weights.w1Layered[i], weights.w3Layered[i]);
-            w2[i] = matrix(hidden, weights.w2Layered[i]);
+            qkv[i] = matrix(perLayer[i].qkv());
+            wo[i] = matrix(perLayer[i].wo());
+            gateUp[i] = matrix(perLayer[i].gateUp());
+            w2[i] = matrix(perLayer[i].w2());
         }
         this.xHalf = new HalfFloatArray(batchSize * dim);
         this.qkvHalf = new HalfFloatArray(batchSize * (qDim + 2 * kvDim));
@@ -166,7 +231,7 @@ public final class MlxPrefillProjections {
     }
 
     /** The tensors, rows stacked in order, as one matrix of {@code k} columns. */
-    private static Matrix matrix(int k, TornadoTensor... tensors) {
+    private static Matrix matrix(TornadoTensor... tensors) {
         DataType type = tensors[0].dataType();
         for (TornadoTensor t : tensors) {
             if (t.dataType() != type) {
@@ -333,6 +398,7 @@ public final class MlxPrefillProjections {
                 context,
                 state.workspace.wrapXBatch,
                 outHalf,
+                residualScale,
                 batchSize * dim);
     }
 
@@ -366,6 +432,7 @@ public final class MlxPrefillProjections {
                 context,
                 state.workspace.wrapXBatch,
                 outHalf,
+                residualScale,
                 batchSize * dim);
     }
 

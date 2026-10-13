@@ -459,6 +459,7 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                 context,
                 state.workspace.wrapXBatch,
                 outHalf,
+                1.0f,
                 batchSize * dim);
 
         layer.task(
@@ -510,6 +511,7 @@ public class Qwen3FP16LayersBatchPrefill implements BatchPrefillTransformerLayer
                 context,
                 state.workspace.wrapXBatch,
                 outHalf,
+                1.0f,
                 batchSize * dim);
 
         layer.persistOnDevice(

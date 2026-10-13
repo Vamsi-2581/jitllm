@@ -59,10 +59,7 @@ public final class MlxPrefillAttention {
             int heads,
             int kvHeads,
             int headDim) {
-        if (!MlxPrefillSupport.attention(state.executionPolicy())) {
-            return null;
-        }
-        return new MlxPrefillAttention(
+        return ifEnabled(
                 state,
                 context,
                 batchSize,
@@ -71,6 +68,23 @@ public final class MlxPrefillAttention {
                 kvHeads,
                 headDim,
                 (float) (1.0 / Math.sqrt(headDim)));
+    }
+
+    /** {@link #ifEnabled(State, KernelContext, int, int, int, int, int)} with its own scale. */
+    public static MlxPrefillAttention ifEnabled(
+            State state,
+            KernelContext context,
+            int batchSize,
+            int contextLength,
+            int heads,
+            int kvHeads,
+            int headDim,
+            float scale) {
+        if (!MlxPrefillSupport.attention(state.executionPolicy())) {
+            return null;
+        }
+        return new MlxPrefillAttention(
+                state, context, batchSize, contextLength, heads, kvHeads, headDim, scale);
     }
 
     public MlxPrefillAttention(
