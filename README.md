@@ -327,6 +327,9 @@ models (`qwen35moe`, e.g. Qwen3.6-35B-A3B), Gemma 4 31B and GLM-4.7-Flash (`deep
 
 Llama-3.3-70B Q4_0 (40 GB) runs this way on two 24 GB NVIDIA A10s at about 10 tokens/s.
 
+Requirements, the supported families and how the pipeline works are in
+[docs/architecture/multi-gpu.md](docs/architecture/multi-gpu.md).
+
 For Q4_0 models the prompt can be prefilled in chunks on every device as well: add
 `--batch-prefill-size 256 --with-native-libraries` (each device runs its layers on the whole
 chunk, then hands the chunk's hidden states to the next one). The chunks overlap: the first
