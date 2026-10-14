@@ -14,6 +14,10 @@ package org.beehive.jitllm.backend.tornado.tensor;
  *   <li>a batched prefill runs at a width the int8 GEMM tiles (1, or a multiple of 128).
  * </ul>
  *
+ * <p>The policy is the one the model is loaded for: the caller's, scoped to the load with {@link
+ * #loading}, or the process's properties for a load outside one (the CLI's). A session that later
+ * asks for a policy the packed layout cannot serve is refused ({@link #unsupported}).
+ *
  * <p>{@code -Djitllm.q8.packed} and {@code -Djitllm.q4.packed} decide instead when set, either way.
  * A packed projection's tensor says so ({@link TornadoTensor#isPacked()}), and every kernel choice
  * consults it: a kernel that reads Q8_0 or Q4_0 blocks must never be handed packed tiles, so the
@@ -33,7 +37,60 @@ public final class PackedWeights {
     /** The int8 GEMM's row tile, which a batched prefill's width must fill. */
     private static final int GEMM_ROWS = 128;
 
+    /** The policy of the load running on this thread, if a caller scoped one. */
+    private static final ThreadLocal<org.beehive.jitllm.runtime.policy.ExecutionPolicy> LOAD =
+            new ThreadLocal<>();
+
     private PackedWeights() {}
+
+    /**
+     * Runs {@code load} with {@link #loadPolicy()} answering {@code policy}: the representation is
+     * chosen for the policy the model is loaded with, not for the process's properties, and a load
+     * on another thread is not affected.
+     */
+    public static <T, E extends Exception> T loading(
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy, Load<T, E> load) throws E {
+        var previous = LOAD.get();
+        LOAD.set(policy);
+        try {
+            return load.run();
+        } finally {
+            if (previous == null) {
+                LOAD.remove();
+            } else {
+                LOAD.set(previous);
+            }
+        }
+    }
+
+    /** A load that {@link #loading} scopes. */
+    @FunctionalInterface
+    public interface Load<T, E extends Exception> {
+        T run() throws E;
+    }
+
+    /** The policy the current load chooses representations for. */
+    public static org.beehive.jitllm.runtime.policy.ExecutionPolicy loadPolicy() {
+        var scoped = LOAD.get();
+        return scoped != null
+                ? scoped
+                : org.beehive.jitllm.runtime.policy.ExecutionPolicy.fromSystemProperties();
+    }
+
+    /**
+     * Why packed projections cannot run under {@code policy}, or empty when they can: a batched
+     * prefill whose width the int8 GEMM, the only packed prefill kernel, does not tile.
+     */
+    public static java.util.Optional<String> unsupported(
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy) {
+        return prefillWidthTiles(policy)
+                ? java.util.Optional.empty()
+                : java.util.Optional.of(
+                        "its packed projections need a batched-prefill width of a multiple of "
+                                + GEMM_ROWS
+                                + ", not "
+                                + policy.prefillBatchSize());
+    }
 
     /**
      * Whether this load packs its Q8_0 projections.
@@ -65,7 +122,7 @@ public final class PackedWeights {
         if (asked != null && !asked.isBlank()) {
             return Boolean.parseBoolean(asked);
         }
-        return familySupports && deviceRunsPackedKernels() && prefillWidthTiles();
+        return familySupports && deviceRunsPackedKernels() && prefillWidthTiles(loadPolicy());
     }
 
     /** CUDA, with the packed-integer dot products and int8 tensor cores the packed kernels use. */
@@ -82,10 +139,13 @@ public final class PackedWeights {
     /**
      * A batched prefill's width fills the int8 GEMM's row tiles, the only packed prefill kernel.
      */
-    private static boolean prefillWidthTiles() {
-        int width =
-                org.beehive.jitllm.runtime.policy.ExecutionPolicy.fromSystemProperties()
-                        .prefillBatchSize();
+    private static boolean prefillWidthTiles(
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy) {
+        if (policy.phaseStrategy()
+                != org.beehive.jitllm.runtime.policy.ExecutionPolicy.PhaseStrategy.PREFILL_DECODE) {
+            return true;
+        }
+        int width = policy.prefillBatchSize();
         return width == 1 || width % GEMM_ROWS == 0;
     }
 
@@ -93,7 +153,7 @@ public final class PackedWeights {
     public static UnsupportedOperationException noPackedKernel(String where) {
         return new UnsupportedOperationException(
                 where
-                        + " reads a packed projection, and this path has no kernel for the packed layout."
-                        + " Run with -Djitllm.q8.packed=false -Djitllm.q4.packed=false.");
+                        + " reads a packed projection, and this path has no kernel for the packed"
+                        + " layout. Run with -Djitllm.q8.packed=false -Djitllm.q4.packed=false.");
     }
 }

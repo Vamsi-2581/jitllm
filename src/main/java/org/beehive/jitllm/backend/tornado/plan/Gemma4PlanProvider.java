@@ -11,6 +11,7 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
+import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
 /**
@@ -138,5 +139,15 @@ public final class Gemma4PlanProvider implements TornadoPlanProvider {
     @Override
     public Set<DataType> nativeLibraryWeights() {
         return Set.of(DataType.Q8_0, DataType.Q4_0);
+    }
+
+    /** The native-library prefill decodes each projection for cuBLAS, from blocks, not tiles. */
+    @Override
+    public Optional<String> packedWeightsUnsupported(ExecutionPolicy policy) {
+        return policy.nativeLibraries()
+                ? Optional.of(
+                        "its native-library prefill decodes the weights for cuBLAS and reads no"
+                                + " packed projections")
+                : Optional.empty();
     }
 }

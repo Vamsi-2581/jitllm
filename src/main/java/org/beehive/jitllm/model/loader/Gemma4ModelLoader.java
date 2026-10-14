@@ -212,14 +212,13 @@ public class Gemma4ModelLoader extends AbstractModelLoader<Gemma4, Gemma4Configu
         // the plan the wrong representation to be admitted on.
         DataType projections = projectionType(tensorEntries, config);
         boolean retain = projections == DataType.Q4_0;
-        // The cuBLAS projections under native libraries read no packed tiles.
+        // The cuBLAS projections under native libraries read no packed tiles (the plan provider
+        // refuses a session that asks for them over packed weights).
         boolean pack =
                 retain
                         && PackedWeights.packQ4(
                                 PackedWeights.packedIntegerDotOn("jitllm.gemma4.packedIntegerDot")
-                                        && !org.beehive.jitllm.runtime.policy.ExecutionPolicy
-                                                .fromSystemProperties()
-                                                .nativeLibraries());
+                                        && !PackedWeights.loadPolicy().nativeLibraries());
         DataType weightType =
                 retain
                         ? DataType.Q4_0

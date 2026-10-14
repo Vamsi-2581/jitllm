@@ -150,6 +150,15 @@ public interface TornadoPlanProvider {
     }
 
     /**
+     * Why this family's plan cannot read projections held in the packed tile layout under {@code
+     * policy}, or empty when it can. Asked of a model whose load packed them, for a policy other
+     * than the one it was loaded with; the width every packed prefill needs is checked apart.
+     */
+    default Optional<String> packedWeightsUnsupported(ExecutionPolicy policy) {
+        return Optional.empty();
+    }
+
+    /**
      * Why this family's batched prefill cannot be built for {@code c}, with either key/value cache,
      * or empty when it can. Asked only for a batched prefill on a device backend.
      */

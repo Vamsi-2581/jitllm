@@ -164,5 +164,17 @@ public class Qwen35TornadoWeights extends TornadoWeights {
                 other.ssmOut,
                 other.weightType);
     }
+
     // @formatter:on
+
+    /** The trunk projections, and the linear-attention input, gate and output projections. */
+    @Override
+    protected java.util.List<TornadoTensor[]> projections() {
+        java.util.List<TornadoTensor[]> projections =
+                new java.util.ArrayList<>(super.projections());
+        projections.add(ssmQkv);
+        projections.add(ssmGate);
+        projections.add(ssmOut);
+        return projections;
+    }
 }
