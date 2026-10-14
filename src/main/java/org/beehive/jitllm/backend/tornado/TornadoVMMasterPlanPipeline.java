@@ -439,7 +439,7 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
                 var workspace = stage.state().workspace;
                 workspace.wrapXBatch.clear();
                 workspace.batchStartPosHolder.init(0);
-                workspace.batchStartPosHolder.set(2, stage.state().kvSlot);
+                workspace.batchStartPosHolder.set(CHUNK_SLOT, stage.state().kvSlot);
             }
         }
         if (batched) {
@@ -460,14 +460,25 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
             throw new IllegalStateException("this pipeline plan was built without batched prefill");
         }
         // The host staged the chunk's start position, active rows and slot in the session state.
-        IntArray chunk = state.workspace.batchStartPosHolder;
+        int[] chunk = state.workspace.batchStartPosHolder.toHeapArray();
         for (Stage stage : stages) {
-            IntArray holder = stage.state().workspace.batchStartPosHolder;
-            for (int i = 0; i < holder.getSize() && i < chunk.getSize(); i++) {
-                holder.set(i, chunk.get(i));
-            }
+            stageControls(chunk, stage.state().workspace.batchStartPosHolder, stage.state().kvSlot);
         }
         transport.execute(plans, prefillGraphs, TornadoVMMasterPlan.CUDA_GRAPHS);
+    }
+
+    /** Index of the key/value slot in a chunk's controls, after its start position and rows. */
+    static final int CHUNK_SLOT = 2;
+
+    /**
+     * A chunk's controls in a stage's own key/value address space: the session's start position and
+     * active rows, and the stage's slot. A stage state owns its cache and block table, so the
+     * session's slot in a shared pool is no address there.
+     */
+    static void stageControls(int[] chunk, IntArray holder, int stageSlot) {
+        for (int i = 0; i < holder.getSize() && i < chunk.length; i++) {
+            holder.set(i, i == CHUNK_SLOT ? stageSlot : chunk[i]);
+        }
     }
 
     @Override
@@ -524,10 +535,9 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
                     } else {
                         chunk = staged[c].join();
                     }
-                    IntArray holder = stages[stage].state().workspace.batchStartPosHolder;
-                    for (int i = 0; i < holder.getSize() && i < chunk.length; i++) {
-                        holder.set(i, chunk[i]);
-                    }
+                    State stageState = stages[stage].state();
+                    stageControls(
+                            chunk, stageState.workspace.batchStartPosHolder, stageState.kvSlot);
                     try {
                         PipelineTransport.executeGraphs(
                                 plan, prefillGraphs[stage], TornadoVMMasterPlan.CUDA_GRAPHS);
