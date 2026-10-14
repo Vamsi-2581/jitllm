@@ -95,6 +95,21 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         this.state = state;
         this.split = split;
         var policy = state.executionPolicy();
+        TornadoDevice[] devices = stageDevices(split);
+        // The mode and every stage's device, before any transport or stage exists.
+        String architecture = model.architectureId().toString();
+        PlanSupport.unsupported(
+                        architecture,
+                        policy,
+                        java.util.Arrays.stream(devices)
+                                .map(device -> TornadoDevices.of(device).backend())
+                                .toList(),
+                        true)
+                .ifPresent(
+                        reason -> {
+                            throw new UnsupportedOperationException(
+                                    PlanSupport.refusal(architecture, model, reason));
+                        });
         this.batched =
                 policy.phaseStrategy()
                                 == org.beehive.jitllm.runtime.policy.ExecutionPolicy.PhaseStrategy
@@ -103,7 +118,6 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         this.batchSize = batched ? policy.prefillBatchSize() : 1;
         ExecutionMode mode = batched ? ExecutionMode.BATCH_PREFILL_DECODE : ExecutionMode.STANDARD;
 
-        TornadoDevice[] devices = devices(split);
         int layers = model.configuration().numberOfLayers();
         int stageCount = devices.length;
         this.stages = new Stage[stageCount];
@@ -364,8 +378,8 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         plans[s] = plan;
     }
 
-    /** The split's {@code backend:device} indices as TornadoVM devices. */
-    private static TornadoDevice[] devices(DeviceSplit split) {
+    /** The split's {@code backend:device} indices as TornadoVM devices, in stage order. */
+    static TornadoDevice[] stageDevices(DeviceSplit split) {
         TornadoDevice[] devices = new TornadoDevice[split.stages()];
         for (int i = 0; i < devices.length; i++) {
             String[] bd = split.devices().get(i).split(":");

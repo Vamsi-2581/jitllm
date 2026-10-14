@@ -70,15 +70,20 @@ public final class DeepSeek2PlanProvider implements TornadoPlanProvider {
                                 + " does not have");
     }
 
+    /** Every deepseek2 kernel is CUDA's: they reduce with warp shuffles, in every mode. */
+    @Override
+    public Optional<String> deviceUnsupported(BackendId backend) {
+        return BackendId.CUDA.equals(backend)
+                ? Optional.empty()
+                : Optional.of("the deepseek2 layers are written for the CUDA backend");
+    }
+
     /**
-     * The latent cache is written and read in FP16 by the decode and batched-prefill kernels, which
-     * are CUDA's: they reduce with warp shuffles.
+     * The latent cache is written and read in FP16 by the decode and batched-prefill kernels; the
+     * backend is {@link #deviceUnsupported}'s to refuse.
      */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {
-        if (!BackendId.CUDA.equals(c.backend())) {
-            return Optional.of("the deepseek2 layers are written for the CUDA backend");
-        }
         if (c.weights() != DataType.Q8_0) {
             return Optional.of("the deepseek2 " + c.weights() + " layers keep an FP32 cache");
         }

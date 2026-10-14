@@ -153,6 +153,7 @@ final class DelegatingModel implements TextGenerationModel {
         this.configuration = new ConfigurationView(delegate.configuration());
         // Before any cache or pool is sized: the model is loaded, so the weight representation
         // and family are known, and the storage and policy are the model's defaults.
+        org.beehive.jitllm.backend.tornado.PlanSupport.require(delegate, this.executionPolicy, gpu);
         org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.require(
                 delegate, this.executionPolicy, storageOptions, gpu);
         org.beehive.jitllm.backend.tornado.NativeLibrarySupport.require(
@@ -395,6 +396,7 @@ final class DelegatingModel implements TextGenerationModel {
             if (!policy.equals(executionPolicy)) {
                 // A session that overrides the execution mode can select layers the model's own
                 // policy did not, so the cache it would share is checked again before the lease.
+                org.beehive.jitllm.backend.tornado.PlanSupport.require(delegate, policy, gpu);
                 org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.require(
                         delegate, policy, storageOptions, gpu);
                 org.beehive.jitllm.backend.tornado.NativeLibrarySupport.require(
@@ -524,7 +526,8 @@ final class DelegatingModel implements TextGenerationModel {
                         () ->
                                 "lowering requested but "
                                         + info.name()
-                                        + " has no shared key/value storage; using the legacy path");
+                                        + " has no shared key/value storage; using the legacy"
+                                        + " path");
                 return new LegacySessionRuntime(delegate, lease, policy, storageOptions);
             }
             // Allocated once per domain. A second lowered session reaches neither of these lines.

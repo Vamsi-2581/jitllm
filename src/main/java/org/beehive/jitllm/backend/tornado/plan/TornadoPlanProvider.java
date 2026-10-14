@@ -7,6 +7,7 @@ import org.beehive.jitllm.backend.tornado.layers.BatchDecodeLayers;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
@@ -137,6 +138,15 @@ public interface TornadoPlanProvider {
      */
     default Set<DataType> nativeLibraryWeights() {
         return Set.of();
+    }
+
+    /**
+     * Why this family's plans cannot run on a {@code backend} device at all — in any mode, with
+     * either key/value cache — or empty when they can. Asked for every plan on a device backend,
+     * and for each stage's device of a model split across devices.
+     */
+    default Optional<String> deviceUnsupported(BackendId backend) {
+        return Optional.empty();
     }
 
     /**
