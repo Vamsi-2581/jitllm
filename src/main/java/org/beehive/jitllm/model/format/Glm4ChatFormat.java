@@ -78,6 +78,7 @@ public class Glm4ChatFormat implements ChatFormat {
     @Override
     public List<Integer> encodeMessage(Message message) {
         List<Integer> tokens = new ArrayList<>();
+        String content = message.content();
         switch (message.role().name()) {
             case "system" -> tokens.add(system);
             case "user" -> tokens.add(user);
@@ -85,16 +86,21 @@ public class Glm4ChatFormat implements ChatFormat {
                 tokens.add(assistant);
                 // The template drops earlier turns' reasoning and writes the turn pre-closed.
                 tokens.add(thinkEnd);
+                content = withoutReasoning(content);
             }
             default -> tokens.add(observation);
         }
-        String content = message.content();
-        int closed = content.lastIndexOf("</think>");
-        if (closed >= 0) {
-            content = content.substring(closed + "</think>".length());
-        }
         tokens.addAll(tokenizer.encodeOrdinaryAsList(content.strip()));
         return tokens;
+    }
+
+    /**
+     * An assistant turn's text after its reasoning: everything up to the last {@code </think>} is
+     * the reasoning. Other roles' text is literal, tags included.
+     */
+    private static String withoutReasoning(String content) {
+        int closed = content.lastIndexOf("</think>");
+        return closed < 0 ? content : content.substring(closed + "</think>".length());
     }
 
     @Override
