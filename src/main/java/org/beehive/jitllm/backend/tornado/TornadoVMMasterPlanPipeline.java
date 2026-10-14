@@ -9,6 +9,7 @@ import org.beehive.jitllm.backend.tornado.layers.ActivationTaskGraph;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.TransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.pipeline.PipelineTransport;
+import org.beehive.jitllm.backend.tornado.pipeline.StageOwnership;
 import org.beehive.jitllm.backend.tornado.plan.ExecutionMode;
 import org.beehive.jitllm.backend.tornado.plan.ForwardPlanFactory;
 import org.beehive.jitllm.backend.tornado.plan.components.BatchPrefillDecodeForwardPlanComponents;
@@ -62,6 +63,7 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
     private final Stage[] stages;
     private final TornadoExecutionPlan[] plans;
     private final PipelineTransport transport;
+    private final StageOwnership ownership;
     private final DeviceSplit split;
 
     /**
@@ -127,25 +129,36 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         var repack = new org.beehive.jitllm.backend.tornado.plan.PackedRepack.Graphs[stageCount];
 
         int[] bounds = split.layerBounds(layers, ForwardPlanFactory.stageLayerAlignment(model));
-        PipelineTransport created = PipelineTransport.create(split.transport(), devices);
+        this.transport = PipelineTransport.create(split.transport(), devices);
+        this.ownership = new StageOwnership(transport);
         try {
             for (int s = 0; s < stageCount; s++) {
                 buildStage(
-                        s, bounds[s], bounds[s + 1], model, state, mode, created, devices, repack);
+                        s,
+                        bounds[s],
+                        bounds[s + 1],
+                        model,
+                        state,
+                        mode,
+                        transport,
+                        devices,
+                        repack);
             }
-        } catch (RuntimeException | Error e) {
-            // A stage that cannot be built leaves the ones before it holding device memory.
-            created.close(this::closePlans);
-            throw e;
+            this.wholePlanTokens =
+                    !batched && java.util.Arrays.stream(repack).allMatch(java.util.Objects::isNull);
+            // Before the warm-up, which is the first execution of the graphs that read the
+            // weights.
+            for (int s = 0; s < stageCount; s++) {
+                org.beehive.jitllm.backend.tornado.plan.PackedRepack.run(plans[s], repack[s]);
+            }
+            forceCopyInReadOnlyData();
+        } catch (RuntimeException e) {
+            // Until the constructor returns the caller has nothing to close: whatever exists by
+            // now — stages built or half-configured, the transport — is released here.
+            throw ownership.releaseAfter(e);
+        } catch (Error e) {
+            throw ownership.releaseAfter(e);
         }
-        this.transport = created;
-        this.wholePlanTokens =
-                !batched && java.util.Arrays.stream(repack).allMatch(java.util.Objects::isNull);
-        // Before the warm-up, which is the first execution of the graphs that read the weights.
-        for (int s = 0; s < stageCount; s++) {
-            org.beehive.jitllm.backend.tornado.plan.PackedRepack.run(plans[s], repack[s]);
-        }
-        forceCopyInReadOnlyData();
     }
 
     /**
@@ -358,9 +371,12 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         repack[s] = stageState.workspace.packedRepack.appendGraphs(graphs, scheduler);
 
         TornadoExecutionPlan plan =
-                new TornadoExecutionPlan(graphs.toArray(new ImmutableTaskGraph[0]))
-                        .withDevice(devices[s])
-                        .withGridScheduler(scheduler);
+                new TornadoExecutionPlan(graphs.toArray(new ImmutableTaskGraph[0]));
+        // Owned before it is configured: configuring can fail, and the wrappers the calls below
+        // return share this plan's executor and device buffers.
+        plans[s] = plan;
+        ownership.own(plan::freeDeviceMemory, plan::close);
+        plan.withDevice(devices[s]).withGridScheduler(scheduler);
         if (TornadoVMMasterPlan.CUDA_GRAPHS && !batched && repack[s] == null) {
             plan.withCUDAGraph();
         } else if (TornadoVMMasterPlan.CUDA_GRAPHS) {
@@ -375,7 +391,6 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         plan.withStagedTransfers();
         plan.withPreCompilation();
         stages[s] = new Stage(first, end, stageState, devices[s], plan);
-        plans[s] = plan;
     }
 
     /** The split's {@code backend:device} indices as TornadoVM devices, in stage order. */
@@ -588,21 +603,6 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
 
     @Override
     public void freeTornadoExecutionPlan() {
-        transport.close(this::closePlans);
-    }
-
-    private void closePlans() {
-        for (TornadoExecutionPlan plan : plans) {
-            if (plan == null) {
-                continue;
-            }
-            plan.freeDeviceMemory();
-            try {
-                plan.close();
-            } catch (Exception e) {
-                throw new IllegalStateException(
-                        "failed to close a pipeline stage's execution plan", e);
-            }
-        }
+        ownership.release();
     }
 }
