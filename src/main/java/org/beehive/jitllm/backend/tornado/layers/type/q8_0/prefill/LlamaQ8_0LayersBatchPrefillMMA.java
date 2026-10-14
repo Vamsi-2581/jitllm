@@ -9,6 +9,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefill
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
+import org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.State;
@@ -109,23 +110,13 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                                 paddedBatch,
                                 config.contextLength())
                         : null;
-        long dim = config.dim();
-        long widest =
-                Math.max(
-                        Math.max((qDim + 2L * config.kvDim()) * dim, 2L * config.hiddenDim() * dim),
-                        Math.max(dim * qDim, dim * config.hiddenDim()));
         this.projections =
                 new FP16Projections(
                         context,
-                        widest,
+                        widestProjection(config),
                         paddedBatch,
                         config.dim(),
-                        FP16Projections.resident(
-                                config.numberOfLayers()
-                                        * dim
-                                        * (2L * qDim
-                                                + 2L * config.kvDim()
-                                                + 3L * config.hiddenDim())),
+                        FP16Projections.resident(state.executionPolicy(), decodedWeights(config)),
                         4 * config.numberOfLayers(),
                         NativePrefillSupport.nativeProjections(state.executionPolicy()));
         this.layerITGs =
@@ -133,6 +124,56 @@ public class LlamaQ8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)
                         .map(TaskGraph::snapshot)
                         .toList();
+    }
+
+    /** The most weights one projection call multiplies: fused QKV, fused gate/up, Wo or W2. */
+    private static long widestProjection(Configuration config) {
+        long dim = config.dim();
+        long qDim = (long) config.numberOfHeads() * config.headSize();
+        return Math.max(
+                Math.max((qDim + 2L * config.kvDim()) * dim, 2L * config.hiddenDim() * dim),
+                Math.max(dim * qDim, dim * config.hiddenDim()));
+    }
+
+    /** The projection weights of every layer, which a resident copy holds decoded. */
+    private static long decodedWeights(Configuration config) {
+        long qDim = (long) config.numberOfHeads() * config.headSize();
+        return config.numberOfLayers()
+                * (long) config.dim()
+                * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim());
+    }
+
+    /** What these layers allocate for one session at {@code batchSize}; see the constructor. */
+    public static BatchPrefillWorkspace workspace(
+            Configuration config,
+            int batchSize,
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
+            boolean fp16Cache) {
+        int padded = (batchSize + 127) & ~127;
+        int qDim = config.numberOfHeads() * config.headSize();
+        long attention =
+                TensorCoreBatchAttention.applies(fp16Cache, padded, config.headSize())
+                        ? TensorCoreBatchAttention.bytes(
+                                qDim,
+                                config.kvDim(),
+                                config.headSize(),
+                                config.numberOfHeads(),
+                                padded,
+                                config.contextLength())
+                        : 0;
+        long weights = decodedWeights(config);
+        boolean nativeGemm = NativePrefillSupport.nativeProjections(policy);
+        int calls = 4 * config.numberOfLayers();
+        long widest = widestProjection(config);
+        return new BatchPrefillWorkspace(
+                weights,
+                attention
+                        + FP16Projections.residentBytes(weights)
+                        + FP16Projections.workspaceBytes(
+                                true, widest, padded, config.dim(), calls, nativeGemm),
+                attention
+                        + FP16Projections.workspaceBytes(
+                                false, widest, padded, config.dim(), calls, nativeGemm));
     }
 
     // @formatter:off

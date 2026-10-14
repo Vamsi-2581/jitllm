@@ -88,4 +88,32 @@ public final class Qwen3PlanProvider implements TornadoPlanProvider {
     public Set<DataType> nativeLibraryWeights() {
         return Set.of(DataType.F16, DataType.Q8_0);
     }
+
+    /** The tensor-core layers' attention, split-K and decoded-projection buffers. */
+    @Override
+    public Optional<org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace>
+            batchPrefillWorkspace(
+                    DataType weights,
+                    org.beehive.jitllm.model.Configuration config,
+                    int batchSize,
+                    org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
+                    boolean fp16Cache) {
+        if (!org.beehive.jitllm.backend.tornado.TensorCoreSupport.isTensorCoreCapableBackend()
+                || !(config instanceof org.beehive.jitllm.model.qwen3.Qwen3Configuration qwen3)) {
+            return Optional.empty();
+        }
+        if (weights == DataType.F16) {
+            return Optional.of(
+                    org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill
+                            .Qwen3FP16LayersBatchPrefillMMA.workspace(
+                            qwen3, batchSize, policy, fp16Cache));
+        }
+        if (weights == DataType.Q8_0) {
+            return Optional.of(
+                    org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill
+                            .Qwen3Q8_0LayersBatchPrefillMMA.workspace(
+                            qwen3, batchSize, policy, fp16Cache));
+        }
+        return Optional.empty();
+    }
 }

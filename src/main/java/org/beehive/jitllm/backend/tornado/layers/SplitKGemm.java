@@ -51,8 +51,18 @@ public final class SplitKGemm {
     public SplitKGemm(KernelContext context, int rows, int widestSplit, boolean nativeGemm) {
         this.context = context;
         this.nativeGemm = nativeGemm;
-        long partialSize = nativeGemm ? 1 : (long) MAX_SLICES * rows * widestSplit;
-        this.partial = new FloatArray(Math.toIntExact(partialSize));
+        this.partial =
+                new FloatArray(Math.toIntExact(partialFloats(rows, widestSplit, nativeGemm)));
+    }
+
+    /** The partial-product buffer's floats: none to speak of when cuBLAS runs the GEMMs. */
+    static long partialFloats(int rows, int widestSplit, boolean nativeGemm) {
+        return nativeGemm ? 1 : (long) MAX_SLICES * rows * widestSplit;
+    }
+
+    /** The device bytes a split-K GEMM of this shape allocates. */
+    public static long bytes(int rows, int widestSplit, boolean nativeGemm) {
+        return partialFloats(rows, widestSplit, nativeGemm) * Float.BYTES;
     }
 
     /** Whether the GEMMs are cuBLAS's. */

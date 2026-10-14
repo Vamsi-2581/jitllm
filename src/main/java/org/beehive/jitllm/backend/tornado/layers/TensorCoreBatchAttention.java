@@ -90,17 +90,46 @@ public final class TensorCoreBatchAttention {
         this.heads = heads;
         this.kvMul = kvMul;
         this.rows = rows;
-        this.paddedPositions = (contextLength + TILE - 1) / TILE * TILE;
+        this.paddedPositions = paddedPositions(contextLength);
         this.headsPerPass = headsPerPass(heads, rows, paddedPositions);
-        this.wide = (headSize + TILE - 1) / TILE * TILE;
+        this.wide = wide(headSize);
         int scoreRows = rows * headsPerPass * paddedPositions;
         this.queries = TornadoWorkspaces.halfFloats(rows * qDim);
         this.keys = TornadoWorkspaces.halfFloats(kvDim * paddedPositions);
-        int valuesPad = wide == headSize ? 0 : (wide - headSize) * paddedPositions;
-        this.valuesT = TornadoWorkspaces.halfFloats(kvDim * paddedPositions + valuesPad);
+        this.valuesT =
+                TornadoWorkspaces.halfFloats(
+                        kvDim * paddedPositions + valuesPad(headSize, paddedPositions));
         this.scores = TornadoWorkspaces.floats(scoreRows);
         this.probs = TornadoWorkspaces.halfFloats(scoreRows);
         this.attn = TornadoWorkspaces.floats(rows * heads * wide);
+    }
+
+    /** The device bytes {@link #TensorCoreBatchAttention} allocates for this shape. */
+    public static long bytes(
+            int qDim, int kvDim, int headSize, int heads, int rows, int contextLength) {
+        int positions = paddedPositions(contextLength);
+        long scoreRows = (long) rows * headsPerPass(heads, rows, positions) * positions;
+        long halfs =
+                (long) rows * qDim // queries
+                        + (long) kvDim * positions // keys
+                        + (long) kvDim * positions
+                        + valuesPad(headSize, positions) // values, transposed
+                        + scoreRows; // probabilities
+        long floats = scoreRows + (long) rows * heads * wide(headSize); // scores, output
+        return halfs * Short.BYTES + floats * Float.BYTES;
+    }
+
+    private static int paddedPositions(int contextLength) {
+        return (contextLength + TILE - 1) / TILE * TILE;
+    }
+
+    private static int wide(int headSize) {
+        return (headSize + TILE - 1) / TILE * TILE;
+    }
+
+    private static int valuesPad(int headSize, int positions) {
+        int wide = wide(headSize);
+        return wide == headSize ? 0 : (wide - headSize) * positions;
     }
 
     /** The most query heads per pass whose scores fit the budget, a divisor of all of them. */

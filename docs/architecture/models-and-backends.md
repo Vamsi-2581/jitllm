@@ -203,7 +203,10 @@ projection, its RoPE) rather than copying the layer graph.
 - **Quantized projections** (`FP16Projections`) decode Q8_0 weights to FP16 and multiply them
   with the FP16 GEMM. Projections wide enough to fill the device are decoded in the tile order
   `gemmMMATiledB` stages and copied with `cp.async`. When the model's decoded weights fit in
-  6 GB, each projection keeps its own decoded copy, decoded on the first chunk only.
+  6 GB, each projection keeps its own decoded copy, decoded on the first chunk only — unless
+  the load's budget has no room for one copy per session, when the preflight settles the
+  policy's `decodedProjections` on a per-chunk scratch instead (pinned with
+  `-Djitllm.prefill.decodedProjections=resident|per-chunk`).
   `DequantizingFP16LayersBatchPrefillMMA` does the same for Q4_0 / Q4_1 (packed tiles
   included) and Q4_K / Q6_K, decoding into one shared scratch per chunk.
 - **Narrow projections** (`SplitKGemm`) whose output fills fewer than 128 tiles of 128×128 split

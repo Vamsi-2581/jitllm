@@ -53,8 +53,17 @@ public final class LocalModels {
         int contextLength = options.contextLength() > 0 ? options.contextLength() : -1;
         boolean gpu = useGpu(options);
 
+        // Where a batched prefill keeps its decoded weights, settled against the budget the
+        // preflight predicts — refused here when nothing fits — so the layers build what was
+        // accounted.
+        ExecutionPolicy.DecodedProjections decodedProjections =
+                options.executionPolicy().decodedProjections();
         if (gpu) {
             MemoryPreflight.refuseIfOverCapacity(modelFile, contextLength, options);
+            decodedProjections =
+                    MemoryPreflight.resolveDecodedProjections(
+                                    modelFile, contextLength, options, options.executionPolicy())
+                            .decodedProjections();
         }
         Model model;
         try {
@@ -76,6 +85,9 @@ public final class LocalModels {
                 gpu && options.usesDefaultExecutionPolicy()
                         ? BatchPrefillSupport.defaultFor(model, options.executionPolicy())
                         : options.executionPolicy();
+        if (gpu) {
+            policy = ExecutionPolicy.from(policy).decodedProjections(decodedProjections).build();
+        }
         return new DelegatingModel(
                 model,
                 modelFile,

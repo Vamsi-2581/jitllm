@@ -10,6 +10,7 @@ import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTas
 import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.SplitKGemm;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
+import org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.State;
@@ -96,6 +97,58 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         return state.usesFp16KeyValueCache();
     }
 
+    /** The widest stacked FP16 copy cuBLAS reads: fused QKV, or fused gate/up. */
+    private static long widestStacked(Configuration config) {
+        long dim = config.dim();
+        long qDim = (long) config.numberOfHeads() * config.headSize();
+        return Math.max((qDim + 2L * config.kvDim()) * dim, 2L * config.hiddenDim() * dim);
+    }
+
+    /** The projection weights of every layer, which a resident stacked copy holds. */
+    private static long stackedWeights(Configuration config) {
+        long qDim = (long) config.numberOfHeads() * config.headSize();
+        return config.numberOfLayers()
+                * (long) config.dim()
+                * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim());
+    }
+
+    /** What these layers allocate for one session at {@code batchSize}; see the constructor. */
+    public static BatchPrefillWorkspace workspace(
+            Configuration config,
+            int batchSize,
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
+            boolean fp16Cache) {
+        int padded = (batchSize + 127) & ~127;
+        int qDim = config.numberOfHeads() * config.headSize();
+        boolean nativeGemm = NativePrefillSupport.nativeProjections(policy);
+        long fixed =
+                (TensorCoreBatchAttention.applies(fp16Cache, padded, config.headSize())
+                                ? TensorCoreBatchAttention.bytes(
+                                        qDim,
+                                        config.kvDim(),
+                                        config.headSize(),
+                                        config.numberOfHeads(),
+                                        padded,
+                                        config.contextLength())
+                                : 0)
+                        + SplitKGemm.bytes(padded, config.dim(), nativeGemm);
+        if (!nativeGemm) {
+            return BatchPrefillWorkspace.fixed(fixed);
+        }
+        long weights = stackedWeights(config);
+        int calls = 2 * config.numberOfLayers();
+        long widest = widestStacked(config);
+        return new BatchPrefillWorkspace(
+                weights,
+                fixed
+                        + FP16Projections.residentBytes(weights)
+                        + FP16Projections.workspaceBytes(
+                                true, widest, padded, config.dim(), calls, true),
+                fixed
+                        + FP16Projections.workspaceBytes(
+                                false, widest, padded, config.dim(), calls, true));
+    }
+
     public LlamaFP16LayersBatchPrefillMMA(
             State state, TornadoWeights weights, Configuration config, int batchSize) {
         this.state = state;
@@ -132,18 +185,15 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                         paddedBatch,
                         config.dim(),
                         NativePrefillSupport.nativeProjections(state.executionPolicy()));
-        long dimL = config.dim();
-        long layerWeights = dimL * (2L * qDim + 2L * config.kvDim() + 3L * config.hiddenDim());
         this.stacked =
                 splitK.nativeGemm()
                         ? new FP16Projections(
                                 context,
-                                Math.max(
-                                        (qDim + 2L * config.kvDim()) * dimL,
-                                        2L * config.hiddenDim() * dimL),
+                                widestStacked(config),
                                 paddedBatch,
                                 config.dim(),
-                                FP16Projections.resident(config.numberOfLayers() * layerWeights),
+                                FP16Projections.resident(
+                                        state.executionPolicy(), stackedWeights(config)),
                                 2 * config.numberOfLayers(),
                                 true)
                         : null;

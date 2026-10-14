@@ -282,7 +282,9 @@ CUDA graph. With `--with-native-libraries` the batched projections run in cuBLAS
 Every model family has a batched prefill on CUDA: Llama, Mistral, Qwen2 / DeepSeek-R1-Distill-Qwen,
 Qwen3, Qwen3.5 / 3.6 / 3.8, Phi-3, Granite, Gemma 4, Devstral, Qwen2-MoE and GLM-4.7-Flash.
 Attention runs as tensor-core GEMMs over the FP16 key/value cache; Q8_0, Q4_0 and Q4_K weights are
-decoded to FP16 for the projection GEMMs (kept decoded when the model's FP16 weights fit in 6 GB).
+decoded to FP16 for the projection GEMMs (kept decoded when the model's FP16 weights fit in 6 GB
+and, under a configured `--gpu-memory` budget, one copy per session fits beside everything else;
+otherwise decoded again for each chunk).
 Decode stays single-token and is usually fastest that way.
 
 Prompt processing on an NVIDIA A100 80GB (pp512, tok/s, best configuration each):

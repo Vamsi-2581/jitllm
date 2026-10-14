@@ -119,4 +119,31 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
     public Set<DataType> nativeLibraryWeights() {
         return Set.of(DataType.Q4_0, DataType.Q8_0, DataType.F16);
     }
+
+    /** The tensor-core layers' attention, split-K and decoded-projection buffers. */
+    @Override
+    public Optional<org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace>
+            batchPrefillWorkspace(
+                    DataType weights,
+                    org.beehive.jitllm.model.Configuration config,
+                    int batchSize,
+                    org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
+                    boolean fp16Cache) {
+        if (!org.beehive.jitllm.backend.tornado.TensorCoreSupport.isTensorCoreCapableBackend()) {
+            return Optional.empty();
+        }
+        if (weights == DataType.F16) {
+            return Optional.of(
+                    org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill
+                            .LlamaFP16LayersBatchPrefillMMA.workspace(
+                            config, batchSize, policy, fp16Cache));
+        }
+        if (weights == DataType.Q8_0) {
+            return Optional.of(
+                    org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill
+                            .LlamaQ8_0LayersBatchPrefillMMA.workspace(
+                            config, batchSize, policy, fp16Cache));
+        }
+        return Optional.empty();
+    }
 }

@@ -11,6 +11,7 @@ import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTas
 import org.beehive.jitllm.backend.tornado.layers.FP16Projections;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.LlamaFP16LayersBatchPrefillMMA;
+import org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
@@ -84,6 +85,64 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
     /** The projections, each Q8_0 weight decoded to FP16 once per chunk. */
     private final FP16Projections projections;
 
+    private static long queryWidth(Qwen3Configuration config) {
+        return (long) config.numberOfHeadsKey() * config.numberOfHeads();
+    }
+
+    private static long keyValueWidth(Qwen3Configuration config) {
+        return (long) config.numberOfHeadsValue() * config.numberOfKeyValueHeads();
+    }
+
+    /** The most weights one projection call multiplies: fused QKV, fused gate/up, Wo or W2. */
+    private static long widestProjection(Qwen3Configuration config) {
+        long dim = config.dim();
+        long qDim = queryWidth(config);
+        long kvDim = keyValueWidth(config);
+        return Math.max(
+                Math.max((qDim + 2L * kvDim) * dim, 2L * config.hiddenDim() * dim),
+                Math.max(dim * qDim, dim * config.hiddenDim()));
+    }
+
+    /** The projection weights of every layer, which a resident copy holds decoded. */
+    private static long decodedWeights(Qwen3Configuration config) {
+        return config.numberOfLayers()
+                * (long) config.dim()
+                * (2L * queryWidth(config) + 2L * keyValueWidth(config) + 3L * config.hiddenDim());
+    }
+
+    /** What these layers allocate for one session at {@code batchSize}; see the constructor. */
+    public static BatchPrefillWorkspace workspace(
+            Qwen3Configuration config,
+            int batchSize,
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
+            boolean fp16Cache) {
+        int padded = (batchSize + 127) & ~127;
+        int headSize = config.numberOfHeadsValue();
+        long attention =
+                TensorCoreBatchAttention.applies(fp16Cache, padded, headSize)
+                        ? TensorCoreBatchAttention.bytes(
+                                (int) queryWidth(config),
+                                (int) keyValueWidth(config),
+                                headSize,
+                                config.numberOfHeads(),
+                                padded,
+                                config.contextLength())
+                        : 0;
+        long weights = decodedWeights(config);
+        boolean nativeGemm = NativePrefillSupport.nativeProjections(policy);
+        int calls = 4 * config.numberOfLayers();
+        long widest = widestProjection(config);
+        return new BatchPrefillWorkspace(
+                weights,
+                attention
+                        + FP16Projections.residentBytes(weights)
+                        + FP16Projections.workspaceBytes(
+                                true, widest, padded, config.dim(), calls, nativeGemm),
+                attention
+                        + FP16Projections.workspaceBytes(
+                                false, widest, padded, config.dim(), calls, nativeGemm));
+    }
+
     public Qwen3Q8_0LayersBatchPrefillMMA(
             Qwen3State state,
             Qwen3TornadoWeights weights,
@@ -119,21 +178,13 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                                 paddedBatch,
                                 config.contextLength())
                         : null;
-        long dim = config.dim();
-        long widest =
-                Math.max(
-                        Math.max((qDim + 2L * kvDim) * dim, 2L * config.hiddenDim() * dim),
-                        Math.max(dim * qDim, dim * config.hiddenDim()));
         this.projections =
                 new FP16Projections(
                         context,
-                        widest,
+                        widestProjection(config),
                         paddedBatch,
                         config.dim(),
-                        FP16Projections.resident(
-                                config.numberOfLayers()
-                                        * dim
-                                        * (2L * qDim + 2L * kvDim + 3L * config.hiddenDim())),
+                        FP16Projections.resident(state.executionPolicy(), decodedWeights(config)),
                         4 * config.numberOfLayers(),
                         NativePrefillSupport.nativeProjections(state.executionPolicy()));
         this.layerITGs =

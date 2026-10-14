@@ -38,12 +38,45 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 // @formatter:on
 public final class FP16Projections {
 
-    /** The FP16 weight bytes up to which every projection keeps a resident decoded copy. */
+    /**
+     * The FP16 bytes up to which the backend keeps every projection decoded when the policy leaves
+     * it the choice. A load that knows its budget resolves the choice against it first ({@code
+     * TornadoMemoryModel.resolveDecodedProjections}).
+     */
     public static final long RESIDENT_BYTES = 6L << 30;
 
-    /** Whether a model whose layers hold {@code weights} weights keeps resident FP16 copies. */
-    public static boolean resident(long weights) {
-        return 2 * weights <= RESIDENT_BYTES;
+    /**
+     * Whether a batched prefill under {@code policy} keeps resident decoded copies of layers that
+     * hold {@code weights} weights.
+     */
+    public static boolean resident(
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy, long weights) {
+        return switch (policy.decodedProjections()) {
+            case RESIDENT -> true;
+            case PER_CHUNK -> false;
+            case BACKEND -> residentBytes(weights) <= RESIDENT_BYTES;
+        };
+    }
+
+    /** The device bytes of resident FP16 copies of {@code weights} weights. */
+    public static long residentBytes(long weights) {
+        return 2 * weights;
+    }
+
+    /**
+     * The device bytes a {@link FP16Projections} allocates besides any resident copies: the
+     * per-chunk scratch (when not resident), the decode flags and the split-K partial products.
+     */
+    public static long workspaceBytes(
+            boolean resident,
+            long widest,
+            int rows,
+            int widestSplit,
+            int projectionCalls,
+            boolean nativeGemm) {
+        return 2 * (resident ? 1 : widest)
+                + (long) (projectionCalls + 1) * Integer.BYTES
+                + SplitKGemm.bytes(rows, widestSplit, nativeGemm);
     }
 
     private final KernelContext context;

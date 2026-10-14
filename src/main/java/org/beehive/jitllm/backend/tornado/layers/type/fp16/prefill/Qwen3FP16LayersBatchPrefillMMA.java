@@ -12,6 +12,7 @@ import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefill
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
 import org.beehive.jitllm.backend.tornado.layers.SplitKGemm;
 import org.beehive.jitllm.backend.tornado.layers.TensorCoreBatchAttention;
+import org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
@@ -274,6 +275,35 @@ public class Qwen3FP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
                 headDim,
                 (float) (1.0 / Math.sqrt(headDim)),
                 true);
+    }
+
+    /**
+     * What these layers allocate for one session at {@code batchSize} beyond the native library's
+     * stacked weights and attention staging, which the configuration accounts; see the constructor.
+     */
+    public static BatchPrefillWorkspace workspace(
+            Qwen3Configuration config,
+            int batchSize,
+            org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
+            boolean fp16Cache) {
+        int padded = (batchSize + 127) & ~127;
+        int headSize = config.numberOfHeadsValue();
+        boolean cudnnAttention =
+                fp16Cache
+                        && NativePrefillSupport.nativeAttention(
+                                policy, sdpaShape(config, batchSize));
+        long attention =
+                !cudnnAttention && TensorCoreBatchAttention.applies(fp16Cache, padded, headSize)
+                        ? TensorCoreBatchAttention.bytes(
+                                config.numberOfHeadsKey() * config.numberOfHeads(),
+                                config.numberOfHeadsValue() * config.numberOfKeyValueHeads(),
+                                headSize,
+                                config.numberOfHeads(),
+                                padded,
+                                config.contextLength())
+                        : 0;
+        return BatchPrefillWorkspace.fixed(
+                attention + SplitKGemm.bytes(padded, config.dim(), false));
     }
 
     public Qwen3FP16LayersBatchPrefillMMA(

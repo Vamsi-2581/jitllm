@@ -159,6 +159,21 @@ public interface TornadoPlanProvider {
     }
 
     /**
+     * What one session's batched prefill of this family allocates for its {@code weights}
+     * representation beyond the staging every family has, as the layer class it would build sizes
+     * it — or empty when that class adds nothing the configuration does not already account.
+     */
+    default Optional<org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace>
+            batchPrefillWorkspace(
+                    DataType weights,
+                    org.beehive.jitllm.model.Configuration config,
+                    int batchSize,
+                    ExecutionPolicy policy,
+                    boolean fp16Cache) {
+        return Optional.empty();
+    }
+
+    /**
      * Why this family's batched prefill cannot be built for {@code c}, with either key/value cache,
      * or empty when it can. Asked only for a batched prefill on a device backend.
      */
