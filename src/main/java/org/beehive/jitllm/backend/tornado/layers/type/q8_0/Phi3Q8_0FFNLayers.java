@@ -13,7 +13,6 @@ import org.beehive.jitllm.inference.state.Phi3State;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Phi3TornadoWeights;
 import org.beehive.jitllm.model.phi3.Phi3Configuration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
@@ -209,12 +208,7 @@ public class Phi3Q8_0FFNLayers
             weights.wUpLayered[layerIndex].asByteArray(),
             weights.wDownLayered[layerIndex].asByteArray()
         };
-        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
-        if (weightSrc != null) {
-            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
             bindDecodeScratch(unifiedLayer, layerIndex);
@@ -645,5 +639,13 @@ public class Phi3Q8_0FFNLayers
      */
     protected String weightSourceGraphName(int layerIndex) {
         return null;
+    }
+
+    /** Phi-3's fused QKV and gate/up tensors, which the MLX prefill multiplies as they are. */
+    @Override
+    protected org.beehive.jitllm.backend.tornado.layers.MlxPrefillProjections.LayerWeights
+            mlxLayerWeights(int layerIndex) {
+        return org.beehive.jitllm.backend.tornado.layers.phi3.Phi3MlxLayerWeights.of(
+                (Phi3TornadoWeights) weights, layerIndex);
     }
 }

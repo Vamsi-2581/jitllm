@@ -1,14 +1,19 @@
 package org.beehive.jitllm.backend.tornado.layers;
 
-import org.beehive.jitllm.backend.tornado.MlxPrefillSupport;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.IntFunction;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.MlxPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
+import org.beehive.jitllm.backend.tornado.tensor.PackedWeights;
 import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.TornadoWeights;
 import org.beehive.jitllm.runtime.tensor.DataType;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
@@ -19,11 +24,6 @@ import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 import uk.ac.manchester.tornado.mlx.Mlx;
 
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
-import java.util.ArrayList;
-import java.util.List;
-
 // @formatter:off
 /**
  * The four batched-prefill projections of a Llama-style layer as MLX GEMMs, for any family whose
@@ -31,11 +31,18 @@ import java.util.List;
  * wrapVBatch}, attends into {@code wrapXbBatch} and adds the output and down projections back into
  * {@code wrapXBatch}.
  *
- * <p>Q, K and V, and gate and up, are stacked so each pair or triple is one GEMM. F16 weights run
- * through {@link Mlx#matmulTransposed}. Q8_0 and Q4_0 weights are repacked once, on the host, into
- * MLX's affine format with groups of 32 and run through {@link Mlx#quantizedMatmul}; the conversion
- * is exact: Q8_0's {@code s * q} is {@code s * (q + 128) - 128 * s}, and Q4_0's {@code s * (q - 8)}
- * is {@code s * q - 8 * s}.
+ * <p>Q, K and V, and gate and up, are stacked so each pair or triple is one GEMM. Which form of the
+ * weights the GEMMs read is {@link MlxPrefill#projections()}: F16 weights through {@link
+ * Mlx#matmulTransposed}; Q8_0 and Q4_0 weights either decoded once into FP16 copies, or repacked
+ * once, on the host, into MLX's affine format with groups of 32 for {@link Mlx#quantizedMatmul}.
+ * The repack is exact: Q8_0's {@code s * q} is {@code s * (q + 128) - 128 * s}, and Q4_0's {@code s
+ * * (q - 8)} is {@code s * q - 8 * s}, with the bias {@code -128 * s} or {@code -8 * s} exact in
+ * FP16.
+ *
+ * <p>Built from an {@link MlxPrefill} the caller resolved, and only from it: a tensor that does not
+ * match it — another type, or packed tiles — is refused, never handed back to the JIT kernels, so
+ * the decode graphs that ask the same {@link MlxPrefill} which weights these graphs bind ({@link
+ * #notBound}) are always right.
  *
  * <p>The family keeps its RMS reductions ({@code batch_attn_rms}, {@code batch_ffn_rms}), RoPE and
  * attention; this replaces the RMS applies and the projection tasks around them. The FP16 operands
@@ -45,17 +52,10 @@ import java.util.List;
 // @formatter:on
 public final class MlxPrefillProjections {
 
-    private static final int GROUP = 32;
-
-    /**
-     * {@code -Djitllm.mlx.fp16Weights=true}: decode Q8_0 and Q4_0 weights once into resident FP16
-     * copies and run every projection as an FP16 GEMM, instead of MLX's quantized matmul over the
-     * repacked weights. Costs the FP16 size of the projections in memory.
-     */
-    private static final boolean FP16_WEIGHTS = Boolean.getBoolean("jitllm.mlx.fp16Weights");
+    private static final int GROUP = MlxPrefill.GROUP;
 
     /** One projection's weights in MLX's form: FP16, or affine-quantized. */
-    private record Matrix(
+    record Matrix(
             HalfFloatArray fp16,
             IntArray q,
             HalfFloatArray scales,
@@ -97,7 +97,7 @@ public final class MlxPrefillProjections {
             TornadoTensor[] qkv, TornadoTensor wo, TornadoTensor[] gateUp, TornadoTensor w2) {
 
         /** The Llama-style layer: separate Q, K, V, gate and up tensors. */
-        static LayerWeights of(TornadoWeights weights, int i) {
+        public static LayerWeights of(TornadoWeights weights, int i) {
             return new LayerWeights(
                     new TornadoTensor[] {
                         weights.wqLayered[i], weights.wkLayered[i], weights.wvLayered[i]
@@ -116,12 +116,48 @@ public final class MlxPrefillProjections {
         }
     }
 
+    // @formatter:off
     /**
-     * The projections of a Llama-style layer for a session running {@code state}'s policy, or null
-     * when they are not MLX's ({@link MlxPrefillSupport#projections}) or the weights are in a form
-     * MLX does not take (packed tiles, or a type other than F16, Q8_0 and Q4_0).
+     * The model weights of {@code layer} that MLX prefill graphs built for {@code mlx} do not bind,
+     * each as its tensor and as its native array, so a graph that would bind them from those graphs
+     * must upload them instead.
+     *
+     * <ul>
+     *   <li>Q8_0 and Q4_0: every projection, since the GEMMs read the FP16 copies or the affine
+     *       repack;
+     *   <li>F16: the tensors stacked into one copy — split Q/K/V and gate/up. A fused tensor and
+     *       the output and down projections are multiplied as they are, so the prefill graph binds
+     *       them.
+     * </ul>
      */
-    public static MlxPrefillProjections ifEnabled(
+    // @formatter:on
+    public static Object[] notBound(MlxPrefill mlx, LayerWeights layer) {
+        List<TornadoTensor> copied = new ArrayList<>();
+        if (mlx.projections() == MlxPrefill.Projections.FP16) {
+            if (layer.qkv().length > 1) {
+                copied.addAll(List.of(layer.qkv()));
+            }
+            if (layer.gateUp().length > 1) {
+                copied.addAll(List.of(layer.gateUp()));
+            }
+        } else {
+            copied.addAll(layer.all());
+        }
+        List<Object> notBound = new ArrayList<>(2 * copied.size());
+        for (TornadoTensor t : copied) {
+            notBound.add(t);
+            notBound.add(t.dataType() == DataType.F16 ? t.asHalfFloatArray() : t.asByteArray());
+        }
+        return notBound.toArray();
+    }
+
+    /**
+     * {@link #of(MlxPrefill, State, TornadoWeights, KernelContext, int, int, int, int, int, int)}
+     * when the batched prefill runs on MLX, or null when {@code mlx} is empty and the family's JIT
+     * projections run.
+     */
+    public static MlxPrefillProjections ifPresent(
+            java.util.Optional<MlxPrefill> mlx,
             State state,
             TornadoWeights weights,
             KernelContext context,
@@ -131,7 +167,63 @@ public final class MlxPrefillProjections {
             int qDim,
             int kvDim,
             int hidden) {
-        return ifEnabled(
+        return mlx.map(
+                        m ->
+                                of(
+                                        m, state, weights, context, batchSize, layers, dim, qDim,
+                                        kvDim, hidden))
+                .orElse(null);
+    }
+
+    /** {@link #ifPresent} for a family with its own layer weights and residual scale. */
+    public static MlxPrefillProjections ifPresent(
+            java.util.Optional<MlxPrefill> mlx,
+            State state,
+            TornadoWeights weights,
+            KernelContext context,
+            int batchSize,
+            int layers,
+            int dim,
+            int qDim,
+            int kvDim,
+            int hidden,
+            float residualScale,
+            IntFunction<LayerWeights> layerWeights) {
+        return mlx.map(
+                        m ->
+                                of(
+                                        m,
+                                        state,
+                                        weights,
+                                        context,
+                                        batchSize,
+                                        layers,
+                                        dim,
+                                        qDim,
+                                        kvDim,
+                                        hidden,
+                                        residualScale,
+                                        layerWeights))
+                .orElse(null);
+    }
+
+    /**
+     * The projections of a Llama-style layer, for a prefill that runs on MLX as {@code mlx}
+     * describes.
+     */
+    public static MlxPrefillProjections of(
+            MlxPrefill mlx,
+            State state,
+            TornadoWeights weights,
+            KernelContext context,
+            int batchSize,
+            int layers,
+            int dim,
+            int qDim,
+            int kvDim,
+            int hidden) {
+        return of(
+                mlx,
                 state,
                 weights,
                 context,
@@ -146,11 +238,16 @@ public final class MlxPrefillProjections {
     }
 
     /**
-     * {@link #ifEnabled(State, TornadoWeights, KernelContext, int, int, int, int, int, int)} for a
-     * family whose layer weights {@code layerWeights} supplies, and whose projections are added
-     * into the residual stream scaled by {@code residualScale}.
+     * {@link #of(MlxPrefill, State, TornadoWeights, KernelContext, int, int, int, int, int, int)}
+     * for a family whose layer weights {@code layerWeights} supplies, and whose projections are
+     * added into the residual stream scaled by {@code residualScale}.
+     *
+     * @throws UnsupportedOperationException if a projection is held in packed tiles, which MLX does
+     *     not read
+     * @throws IllegalStateException if a projection is not of {@code mlx}'s weight type
      */
-    public static MlxPrefillProjections ifEnabled(
+    public static MlxPrefillProjections of(
+            MlxPrefill mlx,
             State state,
             TornadoWeights weights,
             KernelContext context,
@@ -161,24 +258,28 @@ public final class MlxPrefillProjections {
             int kvDim,
             int hidden,
             float residualScale,
-            java.util.function.IntFunction<LayerWeights> layerWeights) {
-        if (!MlxPrefillSupport.projections(state.executionPolicy())) {
-            return null;
-        }
+            IntFunction<LayerWeights> layerWeights) {
         LayerWeights[] perLayer = new LayerWeights[layers];
         for (int i = 0; i < layers; i++) {
             perLayer[i] = layerWeights.apply(i);
             for (TornadoTensor t : perLayer[i].all()) {
-                DataType type = t.dataType();
-                if (t.isPacked()
-                        || (type != DataType.F16
-                                && type != DataType.Q8_0
-                                && type != DataType.Q4_0)) {
-                    return null;
+                if (t.isPacked()) {
+                    throw PackedWeights.noPackedKernel("The MLX batched prefill");
+                }
+                if (t.dataType() != mlx.weights()) {
+                    throw new IllegalStateException(
+                            "the MLX batched prefill was resolved for "
+                                    + mlx.weights()
+                                    + " weights, but layer "
+                                    + i
+                                    + " holds a "
+                                    + t.dataType()
+                                    + " projection");
                 }
             }
         }
         return new MlxPrefillProjections(
+                mlx,
                 state,
                 weights,
                 context,
@@ -192,6 +293,7 @@ public final class MlxPrefillProjections {
     }
 
     private MlxPrefillProjections(
+            MlxPrefill mlx,
             State state,
             TornadoWeights weights,
             KernelContext context,
@@ -216,11 +318,12 @@ public final class MlxPrefillProjections {
         this.wo = new Matrix[layers];
         this.gateUp = new Matrix[layers];
         this.w2 = new Matrix[layers];
+        MlxPrefill.Projections form = mlx.projections();
         for (int i = 0; i < layers; i++) {
-            qkv[i] = matrix(perLayer[i].qkv());
-            wo[i] = matrix(perLayer[i].wo());
-            gateUp[i] = matrix(perLayer[i].gateUp());
-            w2[i] = matrix(perLayer[i].w2());
+            qkv[i] = matrix(form, perLayer[i].qkv());
+            wo[i] = matrix(form, perLayer[i].wo());
+            gateUp[i] = matrix(form, perLayer[i].gateUp());
+            w2[i] = matrix(form, perLayer[i].w2());
         }
         this.xHalf = new HalfFloatArray(batchSize * dim);
         this.qkvHalf = new HalfFloatArray(batchSize * (qDim + 2 * kvDim));
@@ -230,30 +333,33 @@ public final class MlxPrefillProjections {
         this.hbHalf = new HalfFloatArray(batchSize * hidden);
     }
 
-    /** The tensors, rows stacked in order, as one matrix of {@code k} columns. */
-    private static Matrix matrix(TornadoTensor... tensors) {
-        DataType type = tensors[0].dataType();
-        for (TornadoTensor t : tensors) {
-            if (t.dataType() != type) {
-                throw new IllegalArgumentException("MLX projections stack one weight type");
+    /** The tensors, rows stacked in order, as one matrix in {@code form}. */
+    static Matrix matrix(MlxPrefill.Projections form, TornadoTensor... tensors) {
+        return switch (form) {
+            case FP16 -> {
+                HalfFloatArray[] parts = new HalfFloatArray[tensors.length];
+                for (int i = 0; i < parts.length; i++) {
+                    parts[i] = tensors[i].asHalfFloatArray();
+                }
+                yield new Matrix(
+                        parts.length == 1 ? parts[0] : HalfFloatArray.concat(parts),
+                        null,
+                        null,
+                        null,
+                        16);
             }
-        }
-        if (type == DataType.F16) {
-            HalfFloatArray[] parts = new HalfFloatArray[tensors.length];
-            for (int i = 0; i < parts.length; i++) {
-                parts[i] = tensors[i].asHalfFloatArray();
-            }
-            return new Matrix(
-                    parts.length == 1 ? parts[0] : HalfFloatArray.concat(parts),
-                    null,
-                    null,
-                    null,
-                    16);
-        }
-        boolean q8 = type == DataType.Q8_0;
-        if (FP16_WEIGHTS) {
-            return new Matrix(decode(q8, tensors), null, null, null, 16);
-        }
+            case FP16_DECODED -> new Matrix(decode(tensors), null, null, null, 16);
+            case AFFINE -> affine(tensors);
+        };
+    }
+
+    /**
+     * Q8_0 or Q4_0 tensors, rows stacked in order, repacked into MLX's affine format: {@code bits}
+     * -bit unsigned values packed little-end first into 32-bit words, and per group of 32 an FP16
+     * scale and bias with {@code w = scale * q + bias}.
+     */
+    static Matrix affine(TornadoTensor... tensors) {
+        boolean q8 = tensors[0].dataType() == DataType.Q8_0;
         int bits = q8 ? 8 : 4;
         int blockBytes = q8 ? 34 : 18;
         long blocks = 0;
@@ -299,8 +405,9 @@ public final class MlxPrefillProjections {
         return new Matrix(null, q, scales, biases, bits);
     }
 
-    /** The Q8_0 or Q4_0 tensors, rows stacked in order, decoded to FP16. */
-    private static HalfFloatArray decode(boolean q8, TornadoTensor... tensors) {
+    /** Q8_0 or Q4_0 tensors, rows stacked in order, decoded to FP16. */
+    static HalfFloatArray decode(TornadoTensor... tensors) {
+        boolean q8 = tensors[0].dataType() == DataType.Q8_0;
         int blockBytes = q8 ? 34 : 18;
         long blocks = 0;
         for (TornadoTensor t : tensors) {

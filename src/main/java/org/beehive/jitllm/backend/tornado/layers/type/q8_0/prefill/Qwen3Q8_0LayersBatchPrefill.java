@@ -1,5 +1,9 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
 
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
@@ -16,16 +20,12 @@ import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-
-import java.util.List;
-import java.util.stream.IntStream;
 
 /**
  * Batched-prefill transformer-layer TaskGraphs for the Qwen3 Q8_0 unified batched prefill-decode
@@ -72,8 +72,11 @@ public class Qwen3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         this.qDim = nEmbdHeadK * config.numberOfHeads();
         this.kvDim = nEmbdHeadV * nHeadKv;
         this.gqa = config.numberOfHeads() / nHeadKv;
+        Optional<MlxPrefill> mlx =
+                MlxPrefill.resolve(state.executionPolicy(), weights.dataType(), config);
         this.mlxAttention =
-                MlxPrefillAttention.ifEnabled(
+                MlxPrefillAttention.ifPresent(
+                        mlx,
                         state,
                         context,
                         batchSize,
@@ -82,7 +85,8 @@ public class Qwen3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                         nHeadKv,
                         nEmbdHead);
         this.mlxProjections =
-                MlxPrefillProjections.ifEnabled(
+                MlxPrefillProjections.ifPresent(
+                        mlx,
                         state,
                         weights,
                         context,

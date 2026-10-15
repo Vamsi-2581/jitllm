@@ -1,10 +1,10 @@
 package org.beehive.jitllm.backend.tornado.layers;
 
-import org.beehive.jitllm.backend.tornado.MlxPrefillSupport;
+import java.util.Optional;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.MlxPrefillKernels;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
@@ -48,10 +48,11 @@ public final class MlxPrefillAttention {
     private final HalfFloatArray out;
 
     /**
-     * The helper for a session running {@code state}'s policy, or null when its attention is not
-     * MLX's ({@link MlxPrefillSupport#attention}).
+     * The helper for a batched prefill that runs on MLX ({@link MlxPrefill#resolve}), or null when
+     * {@code mlx} is empty and the family's own attention runs.
      */
-    public static MlxPrefillAttention ifEnabled(
+    public static MlxPrefillAttention ifPresent(
+            Optional<MlxPrefill> mlx,
             State state,
             KernelContext context,
             int batchSize,
@@ -59,7 +60,8 @@ public final class MlxPrefillAttention {
             int heads,
             int kvHeads,
             int headDim) {
-        return ifEnabled(
+        return ifPresent(
+                mlx,
                 state,
                 context,
                 batchSize,
@@ -70,8 +72,12 @@ public final class MlxPrefillAttention {
                 (float) (1.0 / Math.sqrt(headDim)));
     }
 
-    /** {@link #ifEnabled(State, KernelContext, int, int, int, int, int)} with its own scale. */
-    public static MlxPrefillAttention ifEnabled(
+    /**
+     * {@link #ifPresent(Optional, State, KernelContext, int, int, int, int, int)} with its own
+     * scale.
+     */
+    public static MlxPrefillAttention ifPresent(
+            Optional<MlxPrefill> mlx,
             State state,
             KernelContext context,
             int batchSize,
@@ -80,7 +86,7 @@ public final class MlxPrefillAttention {
             int kvHeads,
             int headDim,
             float scale) {
-        if (!MlxPrefillSupport.attention(state.executionPolicy())) {
+        if (mlx.isEmpty()) {
             return null;
         }
         return new MlxPrefillAttention(

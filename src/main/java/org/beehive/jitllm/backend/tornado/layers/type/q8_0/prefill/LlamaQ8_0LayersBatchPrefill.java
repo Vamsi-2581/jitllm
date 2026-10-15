@@ -1,5 +1,9 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
 
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
@@ -13,16 +17,12 @@ import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.LlamaState;
 import org.beehive.jitllm.inference.weights.tornado.LlamaTornadoWeights;
 import org.beehive.jitllm.model.llama.LlamaConfiguration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-
-import java.util.List;
-import java.util.stream.IntStream;
 
 /**
  * Batched-prefill transformer-layer TaskGraphs for the unified batched prefill-decode plan (Q8_0).
@@ -64,8 +64,11 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         this.weights = weights;
         this.config = config;
         this.batchSize = batchSize;
+        Optional<MlxPrefill> mlx =
+                MlxPrefill.resolve(state.executionPolicy(), weights.dataType(), config);
         this.mlxAttention =
-                MlxPrefillAttention.ifEnabled(
+                MlxPrefillAttention.ifPresent(
+                        mlx,
                         state,
                         context,
                         batchSize,
@@ -74,7 +77,8 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                         config.numberOfKeyValueHeads(),
                         config.headSize());
         this.mlxProjections =
-                MlxPrefillProjections.ifEnabled(
+                MlxPrefillProjections.ifPresent(
+                        mlx,
                         state,
                         weights,
                         context,

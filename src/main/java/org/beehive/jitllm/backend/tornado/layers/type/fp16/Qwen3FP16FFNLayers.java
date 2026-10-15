@@ -17,14 +17,10 @@ import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Qwen3FP16FFNLayers: FP16 transformer-layer TaskGraphs for Qwen3 with Group Query Attention (GQA)
@@ -334,36 +330,7 @@ public class Qwen3FP16FFNLayers
             weights.w2Layered[layerIndex].asHalfFloatArray(), // FFN down
             weights.w3Layered[layerIndex].asHalfFloatArray() // FFN up
         };
-        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
-        if (weightSrc != null) {
-            // consumeFromDevice only aliases a buffer the producer graph really has. TornadoVM
-            // builds a graph out of its tasks' argument lists, so a weight the producer declares
-            // in transferToDevice but passes to no task is never allocated or uploaded there, and
-            // consuming it here yields a buffer nothing ever wrote — silently, with no diagnostic.
-            // Anything the producer no longer reads is therefore uploaded by this graph instead.
-            Object[] notProvided = weightsNotProvidedBySource(layerIndex);
-            if (notProvided.length == 0) {
-                unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-            } else {
-                List<Object> consumed = new ArrayList<>(layerWeights.length);
-                for (Object w : layerWeights) {
-                    boolean skip = false;
-                    for (Object n : notProvided) {
-                        if (n == w) {
-                            skip = true;
-                            break;
-                        }
-                    }
-                    if (!skip) {
-                        consumed.add(w);
-                    }
-                }
-                unifiedLayer.consumeFromDevice(weightSrc, consumed.toArray());
-                unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, notProvided);
-            }
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
         }
@@ -835,17 +802,6 @@ public class Qwen3FP16FFNLayers
     protected String weightSourceGraphName(int layerIndex) {
         return null;
     }
-
-    /**
-     * Weights that {@link #weightSourceGraphName} names as the producer but that no task in that
-     * graph actually reads, so it never uploads them and this graph has to. Empty by default, which
-     * is the case whenever the producer computes with every weight it declares.
-     */
-    protected Object[] weightsNotProvidedBySource(int layerIndex) {
-        return NO_WEIGHTS;
-    }
-
-    private static final Object[] NO_WEIGHTS = new Object[0];
 
     /** Without a separate finalize task on Metal; see {@link RmsReductionPolicy}. */
     @Override

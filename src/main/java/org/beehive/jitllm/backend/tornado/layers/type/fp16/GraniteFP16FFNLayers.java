@@ -11,7 +11,6 @@ import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.GraniteTornadoWeights;
 import org.beehive.jitllm.model.granite.GraniteConfiguration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
@@ -152,12 +151,7 @@ public class GraniteFP16FFNLayers
             weights.w2Layered[layerIndex].asHalfFloatArray(),
             weights.w3Layered[layerIndex].asHalfFloatArray()
         };
-        String weightSrc = weightSource(weightSourceGraphName(layerIndex));
-        if (weightSrc != null) {
-            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
 
         // === Attention Block ===

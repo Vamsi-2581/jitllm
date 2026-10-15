@@ -1,5 +1,9 @@
 package org.beehive.jitllm.backend.tornado.layers.granite;
 
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.GraniteBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
@@ -13,16 +17,12 @@ import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.GraniteState;
 import org.beehive.jitllm.inference.weights.tornado.GraniteTornadoWeights;
 import org.beehive.jitllm.model.granite.GraniteConfiguration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-
-import java.util.List;
-import java.util.stream.IntStream;
 
 // @formatter:off
 /**
@@ -55,8 +55,11 @@ public class GraniteQ8_0LayersBatchPrefill implements BatchPrefillTransformerLay
         this.weights = weights;
         this.config = config;
         this.batchSize = batchSize;
+        Optional<MlxPrefill> mlx =
+                MlxPrefill.resolve(state.executionPolicy(), weights.dataType(), config);
         this.mlxAttention =
-                MlxPrefillAttention.ifEnabled(
+                MlxPrefillAttention.ifPresent(
+                        mlx,
                         state,
                         context,
                         batchSize,
@@ -66,7 +69,8 @@ public class GraniteQ8_0LayersBatchPrefill implements BatchPrefillTransformerLay
                         config.headSize(),
                         config.attentionScale());
         this.mlxProjections =
-                MlxPrefillProjections.ifEnabled(
+                MlxPrefillProjections.ifPresent(
+                        mlx,
                         state,
                         weights,
                         context,

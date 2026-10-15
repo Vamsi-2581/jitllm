@@ -1,18 +1,15 @@
 package org.beehive.jitllm.backend.tornado.layers.type.fp16.decode;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.Qwen3FP16FFNLayers;
-import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.Qwen3FP16LayersBatchPrefill;
 import org.beehive.jitllm.backend.tornado.layers.type.fp16.prefill.Qwen3FP16LayersBatchPrefillMMA;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.inference.state.Qwen3State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
-
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Decode transformer-layer TaskGraphs for the unified batched prefill-decode plan (Qwen3 FP16).
@@ -159,8 +156,7 @@ public class Qwen3FP16FFNLayersDecode extends Qwen3FP16FFNLayers {
      */
     @Override
     protected Object[] weightsNotProvidedBySource(int layerIndex) {
-        if (!Qwen3FP16LayersBatchPrefillMMA.nativeProjections(state.executionPolicy())
-                && !Qwen3FP16LayersBatchPrefill.mlxProjections(state.executionPolicy())) {
+        if (!Qwen3FP16LayersBatchPrefillMMA.nativeProjections(state.executionPolicy())) {
             return super.weightsNotProvidedBySource(layerIndex);
         }
         List<Object> notProvided = new ArrayList<>(5);

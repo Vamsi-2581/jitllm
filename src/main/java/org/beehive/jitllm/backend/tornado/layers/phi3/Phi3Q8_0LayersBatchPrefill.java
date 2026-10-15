@@ -1,5 +1,9 @@
 package org.beehive.jitllm.backend.tornado.layers.phi3;
 
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.Qwen3PagedKvKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
@@ -9,20 +13,15 @@ import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTas
 import org.beehive.jitllm.backend.tornado.layers.MlxPrefillAttention;
 import org.beehive.jitllm.backend.tornado.layers.MlxPrefillProjections;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
-import org.beehive.jitllm.backend.tornado.tensor.TornadoTensor;
 import org.beehive.jitllm.inference.state.Phi3State;
 import org.beehive.jitllm.inference.weights.tornado.Phi3TornadoWeights;
 import org.beehive.jitllm.model.phi3.Phi3Configuration;
-
 import uk.ac.manchester.tornado.api.GridScheduler;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
-
-import java.util.List;
-import java.util.stream.IntStream;
 
 // @formatter:off
 /**
@@ -54,8 +53,11 @@ public class Phi3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayerT
         this.weights = weights;
         this.config = config;
         this.batchSize = batchSize;
+        Optional<MlxPrefill> mlx =
+                MlxPrefill.resolve(state.executionPolicy(), weights.dataType(), config);
         this.mlxAttention =
-                MlxPrefillAttention.ifEnabled(
+                MlxPrefillAttention.ifPresent(
+                        mlx,
                         state,
                         context,
                         batchSize,
@@ -64,7 +66,8 @@ public class Phi3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayerT
                         config.numberOfKeyValueHeads(),
                         config.headSize());
         this.mlxProjections =
-                MlxPrefillProjections.ifEnabled(
+                MlxPrefillProjections.ifPresent(
+                        mlx,
                         state,
                         weights,
                         context,
@@ -75,12 +78,7 @@ public class Phi3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayerT
                         config.kvDim(),
                         config.hiddenDim(),
                         1.0f,
-                        i ->
-                                new MlxPrefillProjections.LayerWeights(
-                                        new TornadoTensor[] {weights.wqkvLayered[i]},
-                                        weights.woLayered[i],
-                                        new TornadoTensor[] {weights.wUpLayered[i]},
-                                        weights.wDownLayered[i]));
+                        i -> Phi3MlxLayerWeights.of(weights, i));
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)

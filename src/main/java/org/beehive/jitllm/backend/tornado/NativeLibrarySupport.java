@@ -80,7 +80,7 @@ public final class NativeLibrarySupport {
 
     /**
      * On Metal, MLX runs batched-prefill attention for the families above, and the projections too
-     * where {@link MlxPrefillSupport#projections} reaches them; see {@link MlxPrefillSupport}.
+     * where {@link MlxPrefill#projections} reaches them; see {@link MlxPrefill}.
      */
     private static Optional<String> unsupportedOnMetal(Combination c) {
         if (!MLX_ATTENTION_FAMILIES.contains(c.architecture())
@@ -112,7 +112,7 @@ public final class NativeLibrarySupport {
         Combination combination = Fp16KeyValueSupport.resolve(model, policy, gpu);
         Optional<String> reason = unsupported(combination);
         if (reason.isEmpty() && BackendId.METAL.equals(combination.backend())) {
-            if (!MlxPrefillSupport.available()) {
+            if (!MlxPrefill.available()) {
                 reason = Optional.of("MLX's mlx.metallib could not be loaded in this process");
             }
         } else if (reason.isEmpty() && !NativePrefillSupport.cublasAvailable()) {
