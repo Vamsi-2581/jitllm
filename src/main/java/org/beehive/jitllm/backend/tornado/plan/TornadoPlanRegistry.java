@@ -142,15 +142,18 @@ public final class TornadoPlanRegistry {
                                 });
     }
 
-    /** Where a native-library path exists, for a message that must say so: "llama Q4_0, ...". */
-    public static String nativeLibraryPaths() {
+    /**
+     * Where a native-library path exists on {@code backend}, for a message that must say so: "llama
+     * Q4_0, ...".
+     */
+    public static String nativeLibraryPaths(org.beehive.jitllm.runtime.backend.BackendId backend) {
         return Index.BY_ID.values().stream()
-                .filter(provider -> !provider.nativeLibraryWeights().isEmpty())
+                .filter(provider -> !provider.nativeLibraryWeights(backend).isEmpty())
                 .map(
                         provider ->
                                 provider.architecture().name()
                                         + " "
-                                        + provider.nativeLibraryWeights().stream()
+                                        + provider.nativeLibraryWeights(backend).stream()
                                                 .sorted()
                                                 .map(DataType::name)
                                                 .collect(java.util.stream.Collectors.joining("/")))

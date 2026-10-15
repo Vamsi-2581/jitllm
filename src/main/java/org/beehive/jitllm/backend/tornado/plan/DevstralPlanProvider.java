@@ -10,6 +10,7 @@ import org.beehive.jitllm.backend.tornado.plan.components.q8_0.DevstralQ8_0PlanC
 import org.beehive.jitllm.inference.state.DevstralState;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
@@ -82,8 +83,10 @@ public final class DevstralPlanProvider implements TornadoPlanProvider {
      * The batched prefill's projections through cuBLAS, quantized weights decoded to FP16 first.
      */
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q8_0, DataType.Q4_K, DataType.F16);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        return BackendId.CUDA.equals(backend)
+                ? Set.of(DataType.Q8_0, DataType.Q4_K, DataType.F16)
+                : Set.of();
     }
 
     /** Llama's tensor-core layers' attention, split-K and decoded-projection buffers. */

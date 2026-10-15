@@ -1,5 +1,6 @@
 package org.beehive.jitllm.backend.tornado;
 
+import java.util.Optional;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.plan.ExecutionMode;
 import org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry;
@@ -7,18 +8,19 @@ import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.diagnostics.DiagnosticCode;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
-import org.beehive.jitllm.runtime.tensor.DataType;
-
-import java.util.Optional;
 
 /**
  * Where vendor native libraries ({@code --with-native-libraries}) have an implementation.
  *
  * <p>Experimental and off by default: the JIT kernels run every supported configuration, and they
- * are what is measured across models and sizes. The native path replaces batched-prefill
+ * are what is measured across models and sizes. On CUDA the native path replaces batched-prefill
  * projections with cuBLAS GEMMs over stacked weight copies (and the first chunk's attention with
  * cuDNN where it is usable), which costs a second copy of those projections on the device — for
- * Qwen3-8B F16, 8.6 GB beside 13.2 GB of weights.
+ * Qwen3-8B F16, 8.6 GB beside 13.2 GB of weights. On Metal it runs the batched prefill's attention
+ * and projections on Apple MLX ({@link MlxPrefill}).
+ *
+ * <p>Which families and weights have a path on which backend is each provider's answer ({@code
+ * TornadoPlanProvider.nativeLibraryWeights}); nothing here lists them.
  *
  * <p>Asking for it anywhere it is not implemented is refused, never ignored: a request that quietly
  * runs the JIT kernels would read, in a benchmark, as a measurement of the libraries.
@@ -32,15 +34,15 @@ public final class NativeLibrarySupport {
         if (BackendId.CPU.equals(c.backend())) {
             return Optional.of("the CPU path has no native-library implementation");
         }
-        if (BackendId.METAL.equals(c.backend())) {
-            return unsupportedOnMetal(c);
-        }
-        if (!BackendId.CUDA.equals(c.backend())) {
+        if (!BackendId.CUDA.equals(c.backend()) && !BackendId.METAL.equals(c.backend())) {
             return Optional.of("native libraries are implemented on CUDA and Metal only");
         }
         boolean implemented =
                 TornadoPlanRegistry.provider(c.architecture())
-                        .map(provider -> provider.nativeLibraryWeights().contains(c.weights()))
+                        .map(
+                                provider ->
+                                        provider.nativeLibraryWeights(c.backend())
+                                                .contains(c.weights()))
                         .orElse(false);
         if (!implemented) {
             return Optional.of(
@@ -48,8 +50,10 @@ public final class NativeLibrarySupport {
                             + c.architecture()
                             + " / "
                             + c.weights()
+                            + " on "
+                            + c.backend()
                             + " yet ("
-                            + TornadoPlanRegistry.nativeLibraryPaths()
+                            + TornadoPlanRegistry.nativeLibraryPaths(c.backend())
                             + " only)");
         }
         if (c.mode() != ExecutionMode.BATCH_PREFILL_DECODE) {
@@ -57,45 +61,11 @@ public final class NativeLibrarySupport {
                     "native libraries replace batched-prefill kernels only; add"
                             + " --with-prefill-decode --batch-prefill-size N");
         }
+        if (BackendId.METAL.equals(c.backend())) {
+            return Optional.empty();
+        }
         if (!c.tensorCores()) {
             return Optional.of("the native path needs a tensor-core device");
-        }
-        return Optional.empty();
-    }
-
-    /** The families whose Metal batched prefill runs its attention on MLX. */
-    private static final java.util.Set<String> MLX_ATTENTION_FAMILIES =
-            java.util.Set.of(
-                    "llama",
-                    "mistral",
-                    "granite",
-                    "phi3",
-                    "qwen2",
-                    "qwen3",
-                    "deepseek-r1-distill-qwen");
-
-    /** The weight types those families' Metal batched prefill is implemented for. */
-    private static final java.util.Set<DataType> MLX_WEIGHTS =
-            java.util.EnumSet.of(DataType.F16, DataType.Q8_0, DataType.Q4_0);
-
-    /**
-     * On Metal, MLX runs batched-prefill attention for the families above, and the projections too
-     * where {@link MlxPrefill#projections} reaches them; see {@link MlxPrefill}.
-     */
-    private static Optional<String> unsupportedOnMetal(Combination c) {
-        if (!MLX_ATTENTION_FAMILIES.contains(c.architecture())
-                || !MLX_WEIGHTS.contains(c.weights())) {
-            return Optional.of(
-                    "on Metal, MLX is implemented for "
-                            + MLX_ATTENTION_FAMILIES
-                            + " with "
-                            + MLX_WEIGHTS
-                            + " weights only");
-        }
-        if (c.mode() != ExecutionMode.BATCH_PREFILL_DECODE) {
-            return Optional.of(
-                    "MLX replaces batched-prefill projections only; add"
-                            + " --with-prefill-decode --batch-prefill-size N");
         }
         return Optional.empty();
     }
@@ -111,12 +81,14 @@ public final class NativeLibrarySupport {
         }
         Combination combination = Fp16KeyValueSupport.resolve(model, policy, gpu);
         Optional<String> reason = unsupported(combination);
-        if (reason.isEmpty() && BackendId.METAL.equals(combination.backend())) {
-            if (!MlxPrefill.available()) {
-                reason = Optional.of("MLX's mlx.metallib could not be loaded in this process");
+        if (reason.isEmpty()) {
+            if (BackendId.METAL.equals(combination.backend())) {
+                if (!MlxPrefill.available()) {
+                    reason = Optional.of("MLX's mlx.metallib could not be loaded in this process");
+                }
+            } else if (!NativePrefillSupport.cublasAvailable()) {
+                reason = Optional.of("cuBLAS could not be loaded in this process");
             }
-        } else if (reason.isEmpty() && !NativePrefillSupport.cublasAvailable()) {
-            reason = Optional.of("cuBLAS could not be loaded in this process");
         }
         reason.ifPresent(
                 r -> {

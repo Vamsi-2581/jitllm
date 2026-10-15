@@ -11,6 +11,7 @@ import org.beehive.jitllm.backend.tornado.plan.components.q8_0.Qwen2Q8_0PlanComp
 import org.beehive.jitllm.inference.state.Qwen2State;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
@@ -53,7 +54,11 @@ public final class DeepSeekR1DistillQwenPlanProvider implements TornadoPlanProvi
      * weights' output and down projections.
      */
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q8_0, DataType.F16);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        if (BackendId.METAL.equals(backend)) {
+            // Batched prefill attention and projections on Apple MLX (MlxPrefill).
+            return Set.of(DataType.F16, DataType.Q8_0);
+        }
+        return BackendId.CUDA.equals(backend) ? Set.of(DataType.Q8_0, DataType.F16) : Set.of();
     }
 }
