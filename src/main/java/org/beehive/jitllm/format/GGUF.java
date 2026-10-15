@@ -15,6 +15,8 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +51,14 @@ public final class GGUF {
             fileChannel.position(0);
         } catch (Exception e) {
             throw new RuntimeException("Failed to open file channel for " + modelPath, e);
+        }
+
+        // One load parses the same file several times (the memory preflight, the model facts,
+        // the loader); the result is the same as long as the file is.
+        FileIdentity identity = FileIdentity.of(modelPath);
+        Parsed last = lastParsed;
+        if (last != null && last.identity().equals(identity)) {
+            return last.gguf();
         }
 
         // Read and store the gguf metadata
@@ -91,6 +101,7 @@ public final class GGUF {
             // uint8_t tensor_data[];
             gguf.tensorDataOffset = fileChannel.position();
             gguf.reader = null; // the buffer is only needed while parsing
+            lastParsed = new Parsed(identity, gguf);
             return gguf;
         } catch (Exception e) {
             throw new RuntimeException(
@@ -543,6 +554,23 @@ public final class GGUF {
                 done += chunk;
             }
             return bytes;
+        }
+    }
+
+    /** The last file parsed: one entry, enough for the repeated parses of a single load. */
+    private static volatile Parsed lastParsed;
+
+    private record Parsed(FileIdentity identity, GGUF gguf) {}
+
+    /** A file as it is now: rewriting or replacing it changes the size, time or file key. */
+    private record FileIdentity(Path path, Object fileKey, long size, FileTime lastModified) {
+        static FileIdentity of(Path path) throws IOException {
+            BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
+            return new FileIdentity(
+                    path.toRealPath(),
+                    attributes.fileKey(),
+                    attributes.size(),
+                    attributes.lastModifiedTime());
         }
     }
 }
