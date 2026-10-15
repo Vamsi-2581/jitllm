@@ -151,11 +151,10 @@ types directly declares `tornado-api` itself, with `provided` scope.
 jitllm compiles against, and runs on, the TornadoVM SDK that `TORNADOVM_HOME` points at. Any SDK
 from **TornadoVM 7.3** on works: a released one, from the
 [official website](https://www.tornadovm.org/downloads) or [SDKMAN!](https://sdkman.io/sdks/tornadovm/)
-(`sdk install tornadovm`), or a local build of TornadoVM `develop` — which, until 7.3.0 is
-released, is the only SDK that has the half-precision SIMD-group matrix API the Metal batched
-prefill compiles against. Its JDK line must match the JDK
-you build with: a `-jdk21` SDK for JDK 21, a `-jdk22plus` SDK for JDK 22 and newer. The build
-checks both that `TORNADOVM_HOME` is set and that the line matches.
+(`sdk install tornadovm`), or a local build of TornadoVM `develop`. 7.3 is the first release with
+the half-precision SIMD-group matrix API the Metal batched prefill compiles against. Its JDK line
+must match the JDK you build with: a `-jdk21` SDK for JDK 21, a `-jdk22plus` SDK for JDK 22 and
+newer. The build checks both that `TORNADOVM_HOME` is set and that the line matches.
 
 ### Build from source
 

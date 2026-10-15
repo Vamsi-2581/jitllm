@@ -9,7 +9,7 @@ metadata:
 # Build TornadoVM
 
 One SDK per (JDK line, backend). jitllm compiles against whatever SDK `TORNADOVM_HOME`
-points at, from TornadoVM 7.3 on (`develop` until 7.3.0 is released). A released SDK (`sdk install tornadovm`) needs no build;
+points at, from TornadoVM 7.3.0 on. A released SDK (`sdk install tornadovm`) needs no build;
 build one when you need `develop` or a backend no release ships. `pom.xml` names one release,
 `tornadovm.release.version`, which is what `-P release` depends on.
 
