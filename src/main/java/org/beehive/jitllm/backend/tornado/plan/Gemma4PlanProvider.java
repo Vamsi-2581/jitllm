@@ -107,6 +107,17 @@ public final class Gemma4PlanProvider implements TornadoPlanProvider {
     }
 
     /**
+     * The quantized layers split, single-token and batched; the F16 (BF16 file) layers have no
+     * stage layers.
+     */
+    @Override
+    public Optional<String> splitUnsupported(DataType weights, ExecutionPolicy policy, int stages) {
+        return weights == DataType.F16
+                ? TornadoPlanProvider.super.splitUnsupported(weights, policy, stages)
+                : Optional.empty();
+    }
+
+    /**
      * The batched projections and attention are tensor-core kernels, with no scalar twin. Without
      * tensor cores the plan fails at "MMA instructions only supported for the CUDA backend".
      */

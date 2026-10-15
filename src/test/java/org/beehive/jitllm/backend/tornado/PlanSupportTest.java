@@ -8,12 +8,14 @@ import java.util.Map;
 import java.util.Optional;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
+import org.beehive.jitllm.runtime.tensor.DataType;
 import org.junit.Test;
 
 /**
- * The admission every GPU plan passes first, as a pure function of the family, the policy and the
- * devices. The key/value cache precision is not an input: a family that cannot run on a device is
- * refused with an FP32 cache as with an FP16 one, and in single-token decode as in either prefill.
+ * The admission every GPU plan passes first, as a pure function of the family, its weights, the
+ * policy and the devices. The key/value cache precision is not an input: a family that cannot run
+ * on a device is refused with an FP32 cache as with an FP16 one, and in single-token decode as in
+ * either prefill.
  */
 public class PlanSupportTest {
 
@@ -36,7 +38,16 @@ public class PlanSupportTest {
 
     private static Optional<String> check(
             String architecture, ExecutionPolicy policy, boolean split, BackendId... devices) {
-        return PlanSupport.unsupported(architecture, policy, List.of(devices), split);
+        return check(architecture, DataType.Q8_0, policy, split, devices);
+    }
+
+    private static Optional<String> check(
+            String architecture,
+            DataType weights,
+            ExecutionPolicy policy,
+            boolean split,
+            BackendId... devices) {
+        return PlanSupport.unsupported(architecture, weights, policy, List.of(devices), split);
     }
 
     @Test
@@ -95,10 +106,57 @@ public class PlanSupportTest {
 
     @Test
     public void aSplitRunsSingleTokenAndBatchedPrefill() {
-        for (ExecutionPolicy policy : List.of(SINGLE_TOKEN, BATCHED)) {
-            assertEquals(
-                    Optional.empty(), check("llama", policy, true, BackendId.CUDA, BackendId.CUDA));
+        for (String architecture : List.of("gemma4", "qwen35", "qwen35moe", "deepseek2")) {
+            for (ExecutionPolicy policy : List.of(SINGLE_TOKEN, BATCHED)) {
+                assertEquals(
+                        architecture,
+                        Optional.empty(),
+                        check(architecture, policy, true, BackendId.CUDA, BackendId.CUDA));
+            }
         }
+    }
+
+    @Test
+    public void aFamilyWithoutStageLayersIsNotSplit() {
+        for (String architecture : List.of("qwen3", "phi3", "mistral")) {
+            Optional<String> reason =
+                    check(architecture, SINGLE_TOKEN, true, BackendId.CUDA, BackendId.CUDA);
+            assertTrue(architecture, reason.isPresent());
+            assertTrue(reason.get(), reason.get().contains("drop --devices"));
+            // Without a split the same family runs.
+            assertEquals(
+                    Optional.empty(), check(architecture, SINGLE_TOKEN, false, BackendId.CUDA));
+        }
+        // A family splits only the representations whose components build stages.
+        for (String architecture : List.of("llama", "gemma4")) {
+            assertTrue(
+                    architecture,
+                    check(architecture, DataType.F16, SINGLE_TOKEN, true, BackendId.CUDA)
+                            .isPresent());
+        }
+    }
+
+    @Test
+    public void llamaQ8_0SplitsItsSingleTokenPlanOnly() {
+        assertEquals(Optional.empty(), check("llama", SINGLE_TOKEN, true, BackendId.CUDA));
+        Optional<String> reason = check("llama", BATCHED, true, BackendId.CUDA);
+        assertTrue(reason.isPresent());
+        assertTrue(reason.get(), reason.get().contains("drop --batch-prefill-size"));
+        assertEquals(Optional.empty(), check("llama", BATCHED, false, BackendId.CUDA));
+    }
+
+    @Test
+    public void llamaQ4_0StagesNeedNativeLibrariesForABatchedSplit() {
+        // One stage holds the whole model, whose layers decode the projections themselves.
+        assertEquals(
+                Optional.empty(), check("llama", DataType.Q4_0, BATCHED, true, BackendId.CUDA));
+        Optional<String> reason =
+                check("llama", DataType.Q4_0, BATCHED, true, BackendId.CUDA, BackendId.CUDA);
+        assertTrue(reason.isPresent());
+        assertTrue(reason.get(), reason.get().contains("--with-native-libraries"));
+        assertEquals(
+                Optional.empty(),
+                check("llama", DataType.Q4_0, SINGLE_TOKEN, true, BackendId.CUDA, BackendId.CUDA));
     }
 
     @Test

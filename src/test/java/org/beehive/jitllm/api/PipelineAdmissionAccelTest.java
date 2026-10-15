@@ -16,10 +16,12 @@ import org.junit.Test;
 /**
  * A model split across devices ({@code --devices}) has no sequential prefill/decode plan: that
  * policy is refused by name at load, with either key/value cache, rather than built as a
- * single-token pipeline the generation loop then casts to the wrong plan. Single-token and batched
- * pipelines still generate, as does sequential prefill without a split.
+ * single-token pipeline the generation loop then casts to the wrong plan. A split the family's
+ * stages cannot build is refused the same way, before any stage or transport exists. Single-token
+ * and batched pipelines still generate, as does sequential prefill without a split.
  *
- * <p>One device suffices: a one-stage split over the host transport takes the same path.
+ * <p>One device suffices: a split over the host transport takes the same path, with one stage or
+ * with two on the same device.
  */
 public class PipelineAdmissionAccelTest {
 
@@ -58,7 +60,7 @@ public class PipelineAdmissionAccelTest {
 
     @Test
     public void aSessionOverrideToSequentialPrefillIsRefusedOnASplit() throws Exception {
-        Path llama = locate(Fixture.LLAMA_3_2_1B_Q8_0);
+        Path llama = locate(Fixture.LLAMA_3_2_1B_Q4_0);
         withSplit(
                 () -> {
                     try (LocalModel loaded =
@@ -74,6 +76,33 @@ public class PipelineAdmissionAccelTest {
                                 UnsupportedOperationException.class,
                                 () -> ((TextGenerationModel) loaded).newSession(sequential));
                     }
+                });
+    }
+
+    @Test
+    public void aBatchedSplitTheStagesCannotBuildIsRefusedAtLoad() throws Exception {
+        // Llama Q8_0 has no batched stage layers, with one stage as with two.
+        assertRefusedAtLoad(
+                locate(Fixture.LLAMA_3_2_1B_Q8_0), BATCHED, "0:0", "--batch-prefill-size");
+        // Llama Q4_0 stages that hold part of the model run their projections through cuBLAS.
+        assertRefusedAtLoad(
+                locate(Fixture.LLAMA_3_2_1B_Q4_0), BATCHED, "0:0,0:0", "--with-native-libraries");
+    }
+
+    private static void assertRefusedAtLoad(
+            Path file, ExecutionPolicy policy, String devices, String remedy) throws Exception {
+        withSplit(
+                devices,
+                () -> {
+                    UnsupportedOperationException refused =
+                            assertThrows(
+                                    UnsupportedOperationException.class,
+                                    () ->
+                                            LocalModels.load(
+                                                    file, options(policy, StorageOptions.fp16())));
+                    String message = refused.getMessage();
+                    assertTrue(message, message.startsWith("[GPUL-CFG-002]"));
+                    assertTrue(message, message.contains(remedy));
                 });
     }
 
@@ -135,11 +164,15 @@ public class PipelineAdmissionAccelTest {
 
     /** A one-stage split on device 0:0 over the host transport, on the GPU. */
     private static void withSplit(ThrowingRunnable body) throws Exception {
+        withSplit("0:0", body);
+    }
+
+    private static void withSplit(String devices, ThrowingRunnable body) throws Exception {
         withGpu(
                 () ->
                         withProperty(
                                 DeviceSplit.DEVICES_PROPERTY,
-                                "0:0",
+                                devices,
                                 () -> withProperty(DeviceSplit.TRANSPORT_PROPERTY, "host", body)));
     }
 

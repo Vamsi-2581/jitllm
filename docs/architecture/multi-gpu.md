@@ -90,7 +90,9 @@ stage 1 (device 1): receive x, layers [k1, k2), ...  ◀──┘ ... final norm
 | --- | --- | --- |
 | `the NCCL pipeline transport is not in this build` | jitllm built without `-Pnccl` | Rebuild with `-Pnccl`, or use `--split-transport host` |
 | `Unable to load NCCL ... libnccl.so.2` | NCCL library not found | Put the directory holding `libnccl.so.2` on `LD_LIBRARY_PATH` |
-| `this family's batched prefill is not split across devices` | The family splits only its single-token plan (e.g. Llama Q8_0) | Drop `--batch-prefill-size` |
+| `batched prefill is not split across devices` | The family splits only its single-token plan (e.g. Llama Q8_0) | Drop `--batch-prefill-size` |
+| `batched prefill of a pipeline stage runs its projections through cuBLAS` | Llama Q4_0 stages that hold part of the model batch their projections in cuBLAS only | Add `--with-native-libraries` |
+| `plan cannot be split across devices` | The family, or its weights' representation, has no stage layers | Drop `--devices` |
 | `--devices entries are backend:device indices` | A device given as a bare number | Use `0:0,0:1`, as `tornado --devices` prints them |
 | `--tensor-split has N entries for M devices` | Shares and devices differ in count | Give one share per device, or leave `--tensor-split` out |
 | `GPUL-MEM-001` on one stage | That device's layers, cache or the output projection do not fit | Raise `--gpu-memory`, shift layers with `--tensor-split`, or shorten the context |

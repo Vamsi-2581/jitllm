@@ -109,6 +109,35 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
         return Optional.empty();
     }
 
+    /**
+     * F16 has no stage layers. Q8_0 splits its single-token plan only. Q4_0 splits its batched
+     * prefill too, but a stage holding part of the model runs its projections through cuBLAS: only
+     * the whole model's layers decode them for the JIT tensor-core GEMM.
+     */
+    @Override
+    public Optional<String> splitUnsupported(DataType weights, ExecutionPolicy policy, int stages) {
+        boolean batched =
+                policy.phaseStrategy() == ExecutionPolicy.PhaseStrategy.PREFILL_DECODE
+                        && policy.prefillBatchSize() > 1;
+        if (weights == DataType.F16) {
+            return TornadoPlanProvider.super.splitUnsupported(weights, policy, stages);
+        }
+        if (weights == DataType.Q4_0) {
+            return batched && stages > 1 && !NativePrefillSupport.nativeProjections(policy)
+                    ? Optional.of(
+                            "the llama Q4_0 batched prefill of a pipeline stage runs its"
+                                    + " projections through cuBLAS: add --with-native-libraries")
+                    : Optional.empty();
+        }
+        return batched
+                ? Optional.of(
+                        "the llama "
+                                + weights
+                                + " batched prefill is not split across devices; drop"
+                                + " --batch-prefill-size to split its single-token plan")
+                : Optional.empty();
+    }
+
     /** The NVIDIA-class decode layers, whose Q4_0 path writes FP16 too. */
     @Override
     public Optional<String> fp16KeyValueUnsupported(Combination c) {

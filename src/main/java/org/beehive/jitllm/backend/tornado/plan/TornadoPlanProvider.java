@@ -150,6 +150,19 @@ public interface TornadoPlanProvider {
     }
 
     /**
+     * Why this family's plan for {@code weights} cannot be split by layers into {@code stages}
+     * stages ({@code --devices}) under {@code policy}, or empty when it can. Asked before any stage
+     * or transport exists, so it answers what building the stages would: a family answers empty
+     * only where its components are {@code StagedForwardPlanComponents} and, for a batched policy,
+     * build the batched layers of a stage. A family is not split unless it says so.
+     */
+    default Optional<String> splitUnsupported(
+            DataType weights, ExecutionPolicy policy, int stages) {
+        return Optional.of(
+                "the " + architecture() + " plan cannot be split across devices; drop --devices");
+    }
+
+    /**
      * Why this family's plan cannot read projections held in the packed tile layout under {@code
      * policy}, or empty when it can. Asked of a model whose load packed them, for a policy other
      * than the one it was loaded with; the width every packed prefill needs is checked apart.

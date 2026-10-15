@@ -98,10 +98,12 @@ public final class TornadoVMMasterPlanPipeline implements BatchPrefillDecodePlan
         this.split = split;
         var policy = state.executionPolicy();
         TornadoDevice[] devices = stageDevices(split);
-        // The mode and every stage's device, before any transport or stage exists.
+        // The mode, every stage's device and the family's stages, before any transport or stage
+        // exists.
         String architecture = model.architectureId().toString();
         PlanSupport.unsupported(
                         architecture,
+                        model.weights().dataType(),
                         policy,
                         java.util.Arrays.stream(devices)
                                 .map(device -> TornadoDevices.of(device).backend())

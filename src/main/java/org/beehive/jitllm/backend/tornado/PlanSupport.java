@@ -12,27 +12,32 @@ import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.backend.DeviceSplit;
 import org.beehive.jitllm.runtime.diagnostics.DiagnosticCode;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
+import org.beehive.jitllm.runtime.tensor.DataType;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
 
 /**
  * Where a family's plan cannot run at all, whatever the key/value cache precision: on a device its
- * kernels are not written for, split across devices in a mode a split has no plan for, or under a
- * policy its loaded weight representation cannot serve.
+ * kernels are not written for, split across devices in a mode a split has no plan for or that the
+ * family's stages cannot build, or under a policy its loaded weight representation cannot serve.
  *
  * <p>Asked before the cache and batched-prefill checks, which assume the plan can run, and before
- * any device buffer exists. Each family's plan provider names its own devices ({@code
- * TornadoPlanProvider.deviceUnsupported}); this class names no family.
+ * any device buffer exists. Each family's plan provider names its own devices and splits ({@code
+ * TornadoPlanProvider.deviceUnsupported}, {@code splitUnsupported}); this class names no family.
  */
 public final class PlanSupport {
 
     private PlanSupport() {}
 
     /**
-     * Why {@code architecture} cannot run under {@code policy} on {@code devices} — one device, or
-     * each stage's of a split — or empty when it can.
+     * Why {@code architecture}'s plan for {@code weights} cannot run under {@code policy} on {@code
+     * devices} — one device, or each stage's of a split — or empty when it can.
      */
     public static Optional<String> unsupported(
-            String architecture, ExecutionPolicy policy, List<BackendId> devices, boolean split) {
+            String architecture,
+            DataType weights,
+            ExecutionPolicy policy,
+            List<BackendId> devices,
+            boolean split) {
         if (split) {
             Optional<String> mode = splitUnsupported(policy);
             if (mode.isPresent()) {
@@ -44,6 +49,10 @@ public final class PlanSupport {
             if (device.isPresent()) {
                 return device;
             }
+        }
+        if (split) {
+            return TornadoPlanRegistry.provider(architecture)
+                    .flatMap(p -> p.splitUnsupported(weights, policy, devices.size()));
         }
         return Optional.empty();
     }
@@ -90,7 +99,7 @@ public final class PlanSupport {
             devices.add(TornadoDevices.target().backend());
         }
         String architecture = model.architectureId().toString();
-        unsupported(architecture, policy, devices, split.isPresent())
+        unsupported(architecture, model.weights().dataType(), policy, devices, split.isPresent())
                 .or(() -> packedUnsupported(architecture, packed(model), policy))
                 .ifPresent(
                         reason -> {

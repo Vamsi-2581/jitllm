@@ -9,6 +9,7 @@ import org.beehive.jitllm.inference.state.Qwen35MoeState;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
+import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
 /**
@@ -49,6 +50,12 @@ public final class Qwen35MoePlanProvider implements TornadoPlanProvider {
     @Override
     public boolean stageCacheHoldsOnlyItsLayers() {
         return false;
+    }
+
+    /** Every stage's layers are built from a range, single-token and batched alike. */
+    @Override
+    public Optional<String> splitUnsupported(DataType weights, ExecutionPolicy policy, int stages) {
+        return Optional.empty();
     }
 
     /** The qwen35 layers' batched prefill, with the experts in place of the dense feed-forward. */
