@@ -13,6 +13,7 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
+import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
 /** DeepSeek-R1-Distill-Qwen's plan components: Qwen2's, under its own identity. */
@@ -60,5 +61,21 @@ public final class DeepSeekR1DistillQwenPlanProvider implements TornadoPlanProvi
             return Set.of(DataType.F16, DataType.Q8_0);
         }
         return BackendId.CUDA.equals(backend) ? Set.of(DataType.Q8_0, DataType.F16) : Set.of();
+    }
+
+    /** On Metal under native libraries, what the MLX prefill allocates ({@code MlxPrefill}). */
+    @Override
+    public Optional<org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace>
+            batchPrefillWorkspace(
+                    DataType weights,
+                    org.beehive.jitllm.model.Configuration config,
+                    int batchSize,
+                    ExecutionPolicy policy,
+                    boolean fp16Cache) {
+        return org.beehive.jitllm.backend.tornado.MlxPrefill.resolve(policy, weights, config)
+                .map(
+                        mlx ->
+                                org.beehive.jitllm.backend.tornado.MlxPrefill.workspace(
+                                        weights, config, batchSize, false, false));
     }
 }

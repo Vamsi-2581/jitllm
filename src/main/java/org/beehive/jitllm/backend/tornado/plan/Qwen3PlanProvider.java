@@ -103,6 +103,15 @@ public final class Qwen3PlanProvider implements TornadoPlanProvider {
                     int batchSize,
                     org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
                     boolean fp16Cache) {
+        var mlx =
+                org.beehive.jitllm.backend.tornado.MlxPrefill.resolve(policy, weights, config)
+                        .map(
+                                m ->
+                                        org.beehive.jitllm.backend.tornado.MlxPrefill.workspace(
+                                                weights, config, batchSize, false, false));
+        if (mlx.isPresent()) {
+            return mlx;
+        }
         if (!org.beehive.jitllm.backend.tornado.TensorCoreSupport.isTensorCoreCapableBackend()
                 || !(config instanceof org.beehive.jitllm.model.qwen3.Qwen3Configuration qwen3)) {
             return Optional.empty();
