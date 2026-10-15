@@ -67,7 +67,8 @@ Grab a ready-to-run model from the [Hugging Face collections](#-model-collection
 jitLLM is growing into a **serving engine** — the vLLM-style path for the JVM:
 
 - 🌐 **OpenAI-compatible server** — `jitllm serve` exposes `/v1/chat/completions` and `/v1/completions` with streaming and zero external dependencies. `/v1/models` reports the served context length, so clients size their prompts instead of guessing. Point any OpenAI client at `localhost`.
-- 🎯 **Tensor-core (MMA) batch prefill** on the CUDA backend, FP16 & Q8_0 — `--with-prefill-decode --batch-prefill-size N`.
+- 🎯 **Tensor-core batch prefill on CUDA for every model family** (F16, Q8_0, Q4_0, Q4_K) — `--with-prefill-decode --batch-prefill-size N`; add `--with-native-libraries` for cuBLAS projections. Llama-3.2-1B Q8_0 prompt processing 4.9k → 29k tok/s on an A100, past llama.cpp; Qwen3-0.6B F16 54k tok/s with cuDNN attention. See [Fast prompt processing on CUDA](#fast-prompt-processing-on-cuda).
+- 🍎 **SIMD-group matrix batch prefill on Apple Metal**, on by default for every supported family — e.g. Llama-3.2-1B F16 prompt processing 40 → 2372 tok/s, Qwen3-0.6B F16 4171 tok/s on an M4 Pro.
 - 📈 **llama-bench-style benchmarking** — `jitllm --bench` reports a pp/tg matrix with avg±stddev in md/csv/json/jsonl/sql. See [Running the CLI](#-running-the-cli) for the flag.
 - 🧮 **On-device greedy sampling** *(landing next)* — argmax on the GPU keeps logits device-side, cutting device→host traffic by ~500× per token. ([PR #134](https://github.com/beehive-lab/jitllm/pull/134))
 - 📚 **Static batched decode** *(landing next)* — B independent sequences per step for up to **41× aggregate throughput** (Llama & Qwen3). ([PR #129](https://github.com/beehive-lab/jitllm/pull/129))
@@ -148,11 +149,12 @@ types directly declares `tornado-api` itself, with `provided` scope.
 ### TornadoVM
 
 jitllm compiles against, and runs on, the TornadoVM SDK that `TORNADOVM_HOME` points at. Any SDK
-from **TornadoVM 7.0.0** on works: a released one, from the
+from **TornadoVM 7.3** on works: a released one, from the
 [official website](https://www.tornadovm.org/downloads) or [SDKMAN!](https://sdkman.io/sdks/tornadovm/)
-(`sdk install tornadovm`), or a local build of TornadoVM `develop`. Its JDK line must match the JDK
-you build with: a `-jdk21` SDK for JDK 21, a `-jdk22plus` SDK for JDK 22 and newer. The build
-checks both that `TORNADOVM_HOME` is set and that the line matches.
+(`sdk install tornadovm`), or a local build of TornadoVM `develop`. 7.3 is the first release with
+the half-precision SIMD-group matrix API the Metal batched prefill compiles against. Its JDK line
+must match the JDK you build with: a `-jdk21` SDK for JDK 21, a `-jdk22plus` SDK for JDK 22 and
+newer. The build checks both that `TORNADOVM_HOME` is set and that the line matches.
 
 ### Build from source
 
@@ -267,6 +269,82 @@ It is followed by a per-component device memory plan, so you can see what is act
 consuming the budget before changing anything.
 
 -----------
+
+### Fast prompt processing on CUDA
+
+On an NVIDIA GPU with tensor cores, prefill the prompt in batches and replay the plan as a
+CUDA graph. With `--with-native-libraries` the batched projections run in cuBLAS:
+
+```bash
+./jitllm run --gpu --cuda --cuda-graphs --with-prefill-decode --batch-prefill-size 512 \
+  --with-native-libraries -m Llama-3.2-1B-Instruct-Q8_0.gguf --prompt "..."
+```
+
+Every model family has a batched prefill on CUDA: Llama, Mistral, Qwen2 / DeepSeek-R1-Distill-Qwen,
+Qwen3, Qwen3.5 / 3.6 / 3.8, Phi-3, Granite, Gemma 4, Devstral, Qwen2-MoE and GLM-4.7-Flash.
+Attention runs as tensor-core GEMMs over the FP16 key/value cache; Q8_0, Q4_0 and Q4_K weights are
+decoded to FP16 for the projection GEMMs (kept decoded when the model's FP16 weights fit in 6 GB
+and, under a configured `--gpu-memory` budget, one copy per session fits beside everything else;
+otherwise decoded again for each chunk).
+Decode stays single-token and is usually fastest that way.
+
+Prompt processing on an NVIDIA A100 80GB (pp512, tok/s, best configuration each):
+
+| Model | main (1.0.2) | now | llama.cpp |
+| --- | --- | --- | --- |
+| Llama-3.2-1B Q8_0 | 4,921 | 29,004 | 23,550 |
+| Qwen3-0.6B F16 | 12,308 | 54,355 | 40,522 |
+| Granite-3.2-2B Q8_0 | 58 | 13,392 | 9,814 |
+| Mistral-7B Q8_0 | 35 | 5,447 | 4,600 |
+| Gemma-4-31B Q8_0 | — | 1,430 | 1,021 |
+| Llama-3.3-70B Q4_0 | — | 663 | 556 |
+
+`--with-native-libraries` needs cuBLAS 12: the TornadoVM binding loads `libcublasLt.so.12`. On a
+CUDA 13 machine, put a CUDA 12 cuBLAS (for example the `nvidia-cublas-cu12` wheel's `lib`
+directory) on `LD_LIBRARY_PATH`. Qwen3 F16 also runs the first prompt chunk's attention in cuDNN when
+cuDNN 9 is present: build TornadoVM's `libtornado-cudnn.so` (`tornado-drivers/cudnn-jni`) against
+cuDNN 9 (for example the `nvidia-cudnn-cu12` wheel) and add its `lib` directory to
+`LD_LIBRARY_PATH`; with cuDNN 8.9 that attention falls back to jitllm's kernels (36k instead of
+54k tok/s for Qwen3-0.6B F16). Without the flag the same prefill runs on jitllm's own
+tensor-core kernels, about 0.5–0.75× as fast.
+
+-----------
+
+### Several GPUs
+
+A model too large for one GPU can be split by layers across several, like llama.cpp's
+`--split-mode layer`. Each GPU holds a contiguous range of layers with their weights and
+key/value cache, and only the hidden state moves between GPUs, once per token. For one
+request at a time this adds memory, not speed. Llama-family models with Q4_0 or Q8_0 layers
+are supported, and so are Qwen3.5 (`qwen35`, e.g. Qwen3.8-27B) and its mixture-of-experts
+models (`qwen35moe`, e.g. Qwen3.6-35B-A3B), Gemma 4 31B and GLM-4.7-Flash (`deepseek2`).
+
+```bash
+./jitllm run --gpu --cuda --devices 0:0,0:1 --tensor-split 41,39 --gpu-memory 21GB \
+  -m Llama-3.3-70B-Instruct-Q4_0.gguf -c 2048 --prompt "Why is the sky blue?"
+```
+
+- `--devices` lists TornadoVM `backend:device` indices, one pipeline stage per device.
+  `--gpu-memory` applies to each device.
+- `--tensor-split` gives each device's share of the layers (default: equal). Give the last
+  device a little less: it also holds the output projection.
+- `--split-transport nccl` (default) sends the hidden state GPU to GPU with NCCL. It needs a
+  TornadoVM SDK with `tornado-nccl`, libnccl on `LD_LIBRARY_PATH`, and jitllm built with
+  `-Pnccl`. `--split-transport host` copies through host memory and needs neither.
+
+Llama-3.3-70B Q4_0 (40 GB) runs this way on two 24 GB NVIDIA A10s at about 10 tokens/s.
+
+Requirements, the supported families and how the pipeline works are in
+[docs/architecture/multi-gpu.md](docs/architecture/multi-gpu.md).
+
+For Q4_0 models the prompt can be prefilled in chunks on every device as well: add
+`--batch-prefill-size 256 --with-native-libraries` (each device runs its layers on the whole
+chunk, then hands the chunk's hidden states to the next one). The chunks overlap: the first
+device starts the next chunk while the next device still works on the previous one.
+Qwen3.5, Gemma 4 and GLM-4.7-Flash models split the same way with `--batch-prefill-size 256`
+alone: their projections run as int8 tensor-core GEMMs straight on the Q8_0 weights. A
+mixture-of-experts model routes each token to its top experts on the GPU, and a prefill chunk's
+tokens are grouped by expert so every expert's rows run as one GEMM.
 
 ## Run configuration at startup
 

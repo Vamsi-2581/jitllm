@@ -12,8 +12,8 @@ import java.util.Locale;
 import java.util.Random;
 import org.beehive.jitllm.Options;
 import org.beehive.jitllm.backend.cpu.CpuForwardPasses;
+import org.beehive.jitllm.backend.tornado.BatchPrefillDecodePlan;
 import org.beehive.jitllm.backend.tornado.TornadoVMMasterPlan;
-import org.beehive.jitllm.backend.tornado.TornadoVMMasterPlanBatchPrefillDecode;
 import org.beehive.jitllm.backend.tornado.bench.SyntheticKernelBench;
 import org.beehive.jitllm.format.GgufModelFacts;
 import org.beehive.jitllm.inference.ForwardPass;
@@ -428,7 +428,7 @@ public class JitllmBench {
                 hostForward.forward(model, state, toks[pos], pos);
             } else if (batch > 1) {
                 org.beehive.jitllm.backend.tornado.TornadoBatchPrefillPass.decode(
-                        model, state, toks[pos], pos, (TornadoVMMasterPlanBatchPrefillDecode) plan);
+                        model, state, toks[pos], pos, (BatchPrefillDecodePlan) plan);
             } else {
                 org.beehive.jitllm.backend.tornado.TornadoForwardPass.forward(
                         model, state, toks[pos], pos, plan);
@@ -458,13 +458,14 @@ public class JitllmBench {
                 hostForward.forward(model, state, toks[start + i], start + i);
             }
         } else if (batch > 1) {
-            var bp = (TornadoVMMasterPlanBatchPrefillDecode) plan;
-            for (int off = 0; off < count; off += batch) {
-                int chunkSize = Math.min(batch, count - off);
-                int[] chunk = Arrays.copyOfRange(toks, start + off, start + off + chunkSize);
-                org.beehive.jitllm.backend.tornado.TornadoBatchPrefillPass.batchPrefill(
-                        model, state, chunk, start + off, chunkSize, bp);
-            }
+            org.beehive.jitllm.backend.tornado.TornadoBatchPrefillPass.batchPrefillAll(
+                    model,
+                    state,
+                    Arrays.copyOfRange(toks, start, start + count),
+                    start,
+                    count,
+                    batch,
+                    (BatchPrefillDecodePlan) plan);
         } else {
             for (int i = 0; i < count; i++) {
                 org.beehive.jitllm.backend.tornado.TornadoForwardPass.forward(
@@ -478,7 +479,7 @@ public class JitllmBench {
         if (cpu) {
             return "CPU";
         }
-        if (plan instanceof TornadoVMMasterPlanBatchPrefillDecode) {
+        if (plan instanceof BatchPrefillDecodePlan) {
             return "BATCH_PREFILL_DECODE";
         }
         if (plan instanceof org.beehive.jitllm.backend.tornado.TornadoVMMasterPlanPrefillDecode) {

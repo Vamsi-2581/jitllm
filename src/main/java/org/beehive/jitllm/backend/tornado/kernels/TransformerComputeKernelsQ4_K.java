@@ -2,8 +2,12 @@ package org.beehive.jitllm.backend.tornado.kernels;
 
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.math.TornadoMath;
+import uk.ac.manchester.tornado.api.types.HalfFloat;
 import uk.ac.manchester.tornado.api.types.arrays.ByteArray;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
+import uk.ac.manchester.tornado.api.types.arrays.IntArray;
+import uk.ac.manchester.tornado.api.utils.QuantizationUtils;
 
 /**
  * Device kernels that read {@code Q4_K} weights <b>in the file's own representation</b>.
@@ -82,6 +86,47 @@ public final class TransformerComputeKernelsQ4_K {
     }
 
     /**
+     * Decodes a Q4_K weight into FP16 at {@code destOffset} of {@code out}, for a GEMM that reads
+     * FP16 operands. One thread per element of the {@code n}; the row width a multiple of 256, so
+     * element {@code i} lies in super-block {@code i / 256}.
+     */
+    public static void dequantizeQ4_KToFP16(
+            KernelContext context, ByteArray w, HalfFloatArray out, int destOffset, int n) {
+        int gid = context.globalIdx;
+        if (gid < n) {
+            // decode(...) copied in with every read unconditional: called through the helper, the
+            // CUDA backend cannot lower the FP16 store's HalfFloat allocation (NewInstance).
+            int block = gid / QK_K;
+            int blockByteOffset = block * BLOCK_BYTES;
+            int withinBlock = gid - block * QK_K;
+            float d = w.getHalfFloat(blockByteOffset).getFloat32();
+            float dmin = w.getHalfFloat(blockByteOffset + 2).getFloat32();
+            int pairIndex = withinBlock / 64;
+            int posInPair = withinBlock - pairIndex * 64;
+            int highNibble = posInPair / 32;
+            int subBlock = pairIndex * 2 + highNibble;
+            int qByte =
+                    w.get(
+                                    blockByteOffset
+                                            + QS_OFFSET
+                                            + pairIndex * 32
+                                            + (posInPair - highNibble * 32))
+                            & 0xFF;
+            int q = (qByte >> (highNibble * 4)) & 0xF;
+            // Sub-blocks 0-3 read bytes [j] and [j+4]; 4-7 read [j+4], [j-4] and [j]. Reading all
+            // three stays inside the block: [j-4] for j < 4 lands on d/dmin and is discarded.
+            int scalesBase = blockByteOffset + SCALES_OFFSET;
+            int a = w.get(scalesBase + subBlock) & 0xFF;
+            int b = w.get(scalesBase + subBlock + 4) & 0xFF;
+            int c = w.get(scalesBase + subBlock - 4) & 0xFF;
+            int low = subBlock < 4 ? 1 : 0;
+            int sc = low * (a & 63) + (1 - low) * ((b & 0xF) | ((c >> 6) << 4));
+            int m = low * (b & 63) + (1 - low) * (((b >> 4) & 0xF) | ((a >> 6) << 4));
+            out.set(destOffset + gid, new HalfFloat(d * sc * q - dmin * m));
+        }
+    }
+
+    /**
      * One row's dot product against {@code x}, reduced across a 32-lane subgroup.
      *
      * <p>The Q4_K counterpart of {@code matrixVectorRowMajorOptimizedQ8_0Byte}'s reduction, in the
@@ -140,6 +185,117 @@ public final class TransformerComputeKernelsQ4_K {
             context.localBarrier();
         }
         return localSums[0];
+    }
+
+    // @formatter:off
+    /**
+     * {@code output[row] = w[row]·x} reading Q4_K super-blocks where they lie, the dot products
+     * done in packed integers against activations quantized by {@code
+     * TransformerComputeKernelsQ4_0.quantizeActivationQ8Blocks}.
+     *
+     * <p>A lane takes sixteen weights per step: eight bytes of one 32-byte nibble run, whose low
+     * nibbles are eight weights of sub-block {@code 2p} and whose high nibbles are the same eight
+     * of sub-block {@code 2p + 1}. Each sub-block's six-bit scale multiplies its dot product; its
+     * six-bit minimum multiplies the activation block's sum, which covers all 32 weights, so it is
+     * applied once, by the lane holding the first eight. The scales are read by arithmetic select
+     * rather than a branch on the sub-block. Worker: one workgroup of {@code localWorkGroupSize}
+     * lanes (a multiple of 32) per row; {@code n} a multiple of 256.
+     */
+    // @formatter:on
+    public static void matrixVectorGenericQ4_KDP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            IntArray xSums,
+            FloatArray output,
+            ByteArray w,
+            int n,
+            int d,
+            int localWorkGroupSize) {
+        int rowId = context.groupIdx;
+        if (rowId >= d) {
+            return;
+        }
+        int localId = context.localIdx;
+        int warpCount = localWorkGroupSize / 32;
+        float[] warpSums = context.allocateFloatLocalArray(warpCount);
+
+        int superBlocksPerRow = n / QK_K;
+        int rowByteOffset = rowId * superBlocksPerRow * BLOCK_BYTES;
+
+        float partialSum = 0.0f;
+        int unitsPerRow = n / 16;
+        for (int unit = localId; unit < unitsPerRow; unit += localWorkGroupSize) {
+            int superBlock = unit >> 4;
+            int inBlock = unit & 15;
+            int pair = inBlock >> 2;
+            int quarter = inBlock & 3;
+            int base = rowByteOffset + superBlock * BLOCK_BYTES;
+            float dAll = w.getHalfFloat(base).getFloat32();
+            float dMin = w.getHalfFloat(base + 2).getFloat32();
+
+            // Scales and minimums of sub-blocks 2p and 2p+1. Sub-blocks 0-3 keep six bits in
+            // bytes j and j+4; 4-7 take four bits from byte j+4 and their top two from the top
+            // bits of bytes j-4 and j.
+            int high = pair >> 1;
+            int j0 = (pair << 1) & 3;
+            int sc = base + SCALES_OFFSET;
+            int lo0 = w.get(sc + j0) & 0xFF;
+            int mid0 = w.get(sc + j0 + 4) & 0xFF;
+            int hi0 = w.get(sc + j0 + 8) & 0xFF;
+            int lo1 = w.get(sc + j0 + 1) & 0xFF;
+            int mid1 = w.get(sc + j0 + 5) & 0xFF;
+            int hi1 = w.get(sc + j0 + 9) & 0xFF;
+            int scale0 = (lo0 & 63) + high * (((hi0 & 15) | ((lo0 >> 6) << 4)) - (lo0 & 63));
+            int min0 = (mid0 & 63) + high * (((hi0 >> 4) | ((mid0 >> 6) << 4)) - (mid0 & 63));
+            int scale1 = (lo1 & 63) + high * (((hi1 & 15) | ((lo1 >> 6) << 4)) - (lo1 & 63));
+            int min1 = (mid1 & 63) + high * (((hi1 >> 4) | ((mid1 >> 6) << 4)) - (mid1 & 63));
+
+            int qs = base + QS_OFFSET + pair * 32 + quarter * 8;
+            int word0 =
+                    (w.getHalfFloat(qs).getHalfFloatValue() & 0xFFFF)
+                            | ((w.getHalfFloat(qs + 2).getHalfFloatValue() & 0xFFFF) << 16);
+            int word1 =
+                    (w.getHalfFloat(qs + 4).getHalfFloatValue() & 0xFFFF)
+                            | ((w.getHalfFloat(qs + 6).getHalfFloatValue() & 0xFFFF) << 16);
+            int block0 = superBlock * 8 + pair * 2;
+            int block1 = block0 + 1;
+            int a0 = block0 * 8 + quarter * 2;
+            int a1 = block1 * 8 + quarter * 2;
+            int dot0 = QuantizationUtils.dp4a_packed(word0 & 0x0F0F0F0F, xQuants.get(a0), 0);
+            dot0 = QuantizationUtils.dp4a_packed(word1 & 0x0F0F0F0F, xQuants.get(a0 + 1), dot0);
+            int dot1 =
+                    QuantizationUtils.dp4a_packed((word0 >>> 4) & 0x0F0F0F0F, xQuants.get(a1), 0);
+            dot1 =
+                    QuantizationUtils.dp4a_packed(
+                            (word1 >>> 4) & 0x0F0F0F0F, xQuants.get(a1 + 1), dot1);
+            float xs0 = xScales.get(block0);
+            float xs1 = xScales.get(block1);
+            float first = 1 - Math.min(quarter, 1);
+            partialSum +=
+                    dAll * (scale0 * xs0 * dot0 + scale1 * xs1 * dot1)
+                            - first
+                                    * dMin
+                                    * (min0 * xs0 * xSums.get(block0)
+                                            + min1 * xs1 * xSums.get(block1));
+        }
+
+        partialSum += context.simdShuffleDown(partialSum, 16);
+        partialSum += context.simdShuffleDown(partialSum, 8);
+        partialSum += context.simdShuffleDown(partialSum, 4);
+        partialSum += context.simdShuffleDown(partialSum, 2);
+        partialSum += context.simdShuffleDown(partialSum, 1);
+        if ((localId & 31) == 0) {
+            warpSums[localId >> 5] = partialSum;
+        }
+        context.localBarrier();
+        if (localId == 0) {
+            float total = 0.0f;
+            for (int warp = 0; warp < warpCount; warp++) {
+                total += warpSums[warp];
+            }
+            output.set(rowId, total);
+        }
     }
 
     /** {@code output[row] = w[row]·x}. Q4_K counterpart of {@code matrixVectorGenericQ8Byte}. */

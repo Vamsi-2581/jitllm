@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -240,10 +241,25 @@ public class Qwen3Tokenizer implements Tokenizer {
         // all chunks of text are encoded separately, then results are joined
         List<Integer> ids = new ArrayList<>();
         for (String chunk : textChunks) {
-            List<Integer> chunkIds = encodeChunk(byteLevel(chunk));
-            ids.addAll(chunkIds);
+            String bytes = byteLevel(chunk);
+            if (ignoreMerges()) {
+                OptionalInt whole = vocabulary.getIndex(bytes);
+                if (whole.isPresent()) {
+                    ids.add(whole.getAsInt());
+                    continue;
+                }
+            }
+            ids.addAll(encodeChunk(bytes));
         }
         return ids;
+    }
+
+    /**
+     * Whether a pre-tokenizer chunk that is itself a vocabulary entry is emitted as that entry
+     * without running the merges, as llama.cpp does for the vocabularies that declare it (GLM-4).
+     */
+    protected boolean ignoreMerges() {
+        return false;
     }
 
     /**
