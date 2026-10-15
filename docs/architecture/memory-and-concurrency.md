@@ -148,6 +148,21 @@ the per-chunk scratch fits beside an exactly predicted remainder, the load is re
 components are not bisected against measurement, so a plan that carries them is
 `CONSERVATIVE`.
 
+The MLX prefill on Metal is accounted the same way (`MlxPrefill.workspace`, through each
+provider's `batchPrefillWorkspace`): the stacked F16 copies, or the resident FP16 copies or
+affine repack of Q8_0 and Q4_0 projections, the FP16 GEMM staging, and the attention's
+contiguous key/value buffers sized for the whole context. The model's projection weights are
+not charged twice: the prefill graphs stop binding the ones MLX replaced and the decode graphs
+upload those themselves, binding the rest from the prefill graphs. Measured on Qwen3-0.6B at
+width 128 and context 4096, the prediction is within 2 MiB above the allocation in every
+representation.
+
+A `CONSERVATIVE` plan is report-only, with one exception: when its **logical** bytes — every
+buffer counted once, no duplication or headers — already exceed the configured budget, the
+load is refused before the first device buffer (`MemoryPlan.exceedsConfiguredBudgetAtLowerBound`).
+That is a lower bound, so it cannot refuse a load that would have run. It is what refuses
+Mistral-7B Q8_0 with an MLX prefill of 2048 under 14 GB, which otherwise died part-allocated.
+
 ## A note on device memory and test forks
 
 Device memory a closed session frees returns to TornadoVM's buffer provider but not to the
