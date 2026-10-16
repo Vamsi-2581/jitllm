@@ -237,12 +237,7 @@ public class Qwen2FP16FFNLayers
             weights.w2Layered[layerIndex].asHalfFloatArray(),
             weights.w3Layered[layerIndex].asHalfFloatArray()
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
-        if (weightSrc != null) {
-            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
             bindDecodeScratch(unifiedLayer, layerIndex);

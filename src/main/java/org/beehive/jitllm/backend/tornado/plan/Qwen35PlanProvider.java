@@ -121,7 +121,7 @@ public final class Qwen35PlanProvider implements TornadoPlanProvider {
     }
 
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q8_0);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        return BackendId.CUDA.equals(backend) ? Set.of(DataType.Q8_0) : Set.of();
     }
 }

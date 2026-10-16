@@ -148,8 +148,8 @@ public final class Gemma4PlanProvider implements TornadoPlanProvider {
     }
 
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q8_0, DataType.Q4_0);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        return BackendId.CUDA.equals(backend) ? Set.of(DataType.Q8_0, DataType.Q4_0) : Set.of();
     }
 
     /** The native-library prefill decodes each projection for cuBLAS, from blocks, not tiles. */

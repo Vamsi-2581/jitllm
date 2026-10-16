@@ -177,13 +177,14 @@ public class LlamaQ8_0FFNLayers
             weights.w3Layered[layerIndex]
         };
         String weightSrc = weightSourceGraphName(layerIndex);
-        if (weightSrc != null) {
+        Object[][] binding = weightBinding(weightSrc, layerIndex, layerWeights);
+        if (binding[0].length > 0) {
             unifiedLayer.consumeFromDevice(
                     weightSrc,
-                    org.beehive.jitllm.backend.tornado.plan.PackedRepack.deviceArrays(
-                            layerWeights));
-        } else {
-            state.workspace.packedRepack.upload(unifiedLayer, layerWeights);
+                    org.beehive.jitllm.backend.tornado.plan.PackedRepack.deviceArrays(binding[0]));
+        }
+        if (binding[1].length > 0) {
+            state.workspace.packedRepack.upload(unifiedLayer, binding[1]);
         }
         boolean packed = PackedActivationTasks.enabled();
         if (firstInGraph) {

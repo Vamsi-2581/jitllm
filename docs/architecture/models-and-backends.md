@@ -219,6 +219,21 @@ projection, its RoPE) rather than copying the layer graph.
   refused elsewhere. The TornadoVM binding loads `libcublasLt.so.12`. For Qwen3 F16 the first
   chunk's attention runs as a cuDNN fused SDPA when the TornadoVM cuDNN shim is built against
   cuDNN 9; against cuDNN 8.9 the plan cannot be built and the tensor-core GEMM attention runs.
+- **Native libraries on Metal (Apple MLX).** With `--with-native-libraries` on a Metal device
+  the batched prefill runs every chunk's attention as MLX's fused causal attention over the
+  chunk's context, gathered from the paged cache into contiguous FP16 buffers, and its four
+  projections as MLX GEMMs, launched by TornadoVM's `tornado-mlx` library tasks on TornadoVM's
+  own queue and buffers (`MlxPrefill`). Decode stays on the JIT kernels. Each provider declares
+  the weights it implements per backend (`TornadoPlanProvider.nativeLibraryWeights(BackendId)`):
+  on Metal Llama (F16, Q8_0, Q4_0), and Mistral, Qwen2 / DeepSeek, Qwen3, Phi-3 and Granite
+  (F16, Q8_0); everything else is refused. F16 weights are multiplied as they are, split Q/K/V
+  and gate/up stacked into one copy each. Q8_0 and Q4_0 weights are either decoded once into
+  resident FP16 copies or repacked exactly into MLX's affine format — the same
+  `decodedProjections` residency as above, settled against the budget at load or pinned with
+  `-Djitllm.prefill.decodedProjections=resident|per-chunk`. Packed projections are refused by
+  name. Needs `brew install mlx` (MLX 0.32.3) and an M4-class GPU; validated with
+  `-Dtornado.mlx.async=true`, without which every MLX call waits for the GPU and prefill is
+  slower than the JIT kernels.
 
 Prompt processing on an NVIDIA A100 80GB (pp512, chunk 512, `--cuda-graphs`, tok/s); batched
 greedy text matches single-token text except where noted:
@@ -259,7 +274,7 @@ assuming the CUDA result carries over.
 | Model loading, device selection | yes | yes | yes | yes |
 | `STANDARD` single-token decode | yes | yes | yes | yes |
 | Sequential prefill/decode | yes | yes | yes | yes |
-| Batched prefill/decode | yes | yes (tensor cores, every family; cuBLAS with `--with-native-libraries`) | yes | yes (SIMD-group kernels, FP16 or FP32 cache) |
+| Batched prefill/decode | yes | yes (tensor cores, every family; cuBLAS with `--with-native-libraries`) | yes | yes (SIMD-group kernels, FP16 or FP32 cache; MLX with `--with-native-libraries`) |
 | FP16 key/value cache (the default) | yes | yes | NVIDIA-class devices | yes, except Gemma 4 Q4_0 ([matrix](kv-cache-support.md#metal)) |
 | F16 and Q8_0 weights | yes | yes | yes | yes |
 | Q4_K / Q6_K device residency | n/a | yes | yes | yes |

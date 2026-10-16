@@ -151,12 +151,7 @@ public class GraniteFP16FFNLayers
             weights.w2Layered[layerIndex].asHalfFloatArray(),
             weights.w3Layered[layerIndex].asHalfFloatArray()
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
-        if (weightSrc != null) {
-            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
 
         // === Attention Block ===

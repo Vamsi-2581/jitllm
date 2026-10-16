@@ -261,12 +261,7 @@ public class Qwen3Q8_0FFNLayers
             weights.w2Layered[layerIndex].asByteArray(), // FFN down projection
             weights.w3Layered[layerIndex].asByteArray() // FFN up projection
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
-        if (weightSrc != null) {
-            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
             if (PackedActivationTasks.enabled()) {

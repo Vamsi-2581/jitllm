@@ -145,8 +145,14 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
     }
 
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q4_0, DataType.Q8_0, DataType.F16);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        if (BackendId.METAL.equals(backend)) {
+            // Batched prefill attention and projections on Apple MLX (MlxPrefill).
+            return Set.of(DataType.F16, DataType.Q8_0, DataType.Q4_0);
+        }
+        return BackendId.CUDA.equals(backend)
+                ? Set.of(DataType.Q4_0, DataType.Q8_0, DataType.F16)
+                : Set.of();
     }
 
     /** The tensor-core layers' attention, split-K and decoded-projection buffers. */
@@ -158,6 +164,15 @@ public final class LlamaPlanProvider implements TornadoPlanProvider {
                     int batchSize,
                     org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
                     boolean fp16Cache) {
+        var mlx =
+                org.beehive.jitllm.backend.tornado.MlxPrefill.resolve(policy, weights, config)
+                        .map(
+                                m ->
+                                        org.beehive.jitllm.backend.tornado.MlxPrefill.workspace(
+                                                weights, config, batchSize, false, false));
+        if (mlx.isPresent()) {
+            return mlx;
+        }
         if (!org.beehive.jitllm.backend.tornado.TensorCoreSupport.isTensorCoreCapableBackend()) {
             return Optional.empty();
         }

@@ -15,6 +15,7 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.tornado.Qwen3TornadoWeights;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.model.qwen3.Qwen3Configuration;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
@@ -85,8 +86,12 @@ public final class Qwen3PlanProvider implements TornadoPlanProvider {
      * through cuBLAS over the weights decoded to FP16.
      */
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.F16, DataType.Q8_0);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        if (BackendId.METAL.equals(backend)) {
+            // Batched prefill attention and projections on Apple MLX (MlxPrefill).
+            return Set.of(DataType.F16, DataType.Q8_0);
+        }
+        return BackendId.CUDA.equals(backend) ? Set.of(DataType.F16, DataType.Q8_0) : Set.of();
     }
 
     /** The tensor-core layers' attention, split-K and decoded-projection buffers. */
@@ -98,6 +103,15 @@ public final class Qwen3PlanProvider implements TornadoPlanProvider {
                     int batchSize,
                     org.beehive.jitllm.runtime.policy.ExecutionPolicy policy,
                     boolean fp16Cache) {
+        var mlx =
+                org.beehive.jitllm.backend.tornado.MlxPrefill.resolve(policy, weights, config)
+                        .map(
+                                m ->
+                                        org.beehive.jitllm.backend.tornado.MlxPrefill.workspace(
+                                                weights, config, batchSize, false, false));
+        if (mlx.isPresent()) {
+            return mlx;
+        }
         if (!org.beehive.jitllm.backend.tornado.TensorCoreSupport.isTensorCoreCapableBackend()
                 || !(config instanceof org.beehive.jitllm.model.qwen3.Qwen3Configuration qwen3)) {
             return Optional.empty();

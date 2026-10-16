@@ -13,6 +13,7 @@ import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.model.ArchitectureId;
+import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
 import org.beehive.jitllm.runtime.tensor.DataType;
 
 /** Phi3's plan components. */
@@ -67,7 +68,27 @@ public final class Phi3PlanProvider implements TornadoPlanProvider {
      * weights' output and down projections.
      */
     @Override
-    public Set<DataType> nativeLibraryWeights() {
-        return Set.of(DataType.Q8_0, DataType.F16);
+    public Set<DataType> nativeLibraryWeights(BackendId backend) {
+        if (BackendId.METAL.equals(backend)) {
+            // Batched prefill attention and projections on Apple MLX (MlxPrefill).
+            return Set.of(DataType.F16, DataType.Q8_0);
+        }
+        return BackendId.CUDA.equals(backend) ? Set.of(DataType.Q8_0, DataType.F16) : Set.of();
+    }
+
+    /** On Metal under native libraries, what the MLX prefill allocates ({@code MlxPrefill}). */
+    @Override
+    public Optional<org.beehive.jitllm.backend.tornado.memory.BatchPrefillWorkspace>
+            batchPrefillWorkspace(
+                    DataType weights,
+                    org.beehive.jitllm.model.Configuration config,
+                    int batchSize,
+                    ExecutionPolicy policy,
+                    boolean fp16Cache) {
+        return org.beehive.jitllm.backend.tornado.MlxPrefill.resolve(policy, weights, config)
+                .map(
+                        mlx ->
+                                org.beehive.jitllm.backend.tornado.MlxPrefill.workspace(
+                                        weights, config, batchSize, true, true));
     }
 }

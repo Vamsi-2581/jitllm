@@ -2,7 +2,9 @@ package org.beehive.jitllm.backend.tornado.layers;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.device.TornadoDevices;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
 import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
@@ -10,6 +12,7 @@ import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.Weights;
+import org.beehive.jitllm.inference.weights.tornado.TornadoWeights;
 import org.beehive.jitllm.model.Configuration;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
@@ -46,6 +49,14 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
      */
     protected final boolean scalarFp16KeyValueReads;
 
+    /**
+     * The MLX batched prefill of this session, when it runs on one ({@link MlxPrefill#resolve}):
+     * the same answer the batched-prefill layers built their graphs from, which is what tells a
+     * decode graph the model weights those graphs do not bind ({@link
+     * #weightsNotProvidedBySource}).
+     */
+    protected final Optional<MlxPrefill> mlxPrefill;
+
     protected AbstractTransformerLayerTaskGraphs(
             String taskGraphName, State state, W weights, C config, SchedulerType schedulerType) {
         super(taskGraphName, state, weights, config);
@@ -54,6 +65,7 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
         this.weights = weights;
         this.config = config;
         this.schedulerType = schedulerType;
+        this.mlxPrefill = MlxPrefill.resolve(state.executionPolicy(), weights.dataType(), config);
         // the ffnLayerITGs is initialized on subclasses
         // due to some model-specific values (i.e. in Qwen3)
     }
@@ -271,4 +283,84 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
                 && !packedHalf2Attention
                 && LaneAttentionPolicy.laneCooperativeAttention(headSize);
     }
+
+    // ── Binding a layer's weights from the batched-prefill graph that uploaded them ──────────
+
+    /**
+     * Weights that {@code weightSourceGraphName} names as the producer but that no task in that
+     * graph reads, so it never uploads them and this graph has to.
+     *
+     * <p>Empty unless the batched prefill runs on MLX. Its graphs then read MLX's forms of the
+     * projections — stacked F16 copies, or the affine repack or FP16 copies of Q8_0 and Q4_0 — and
+     * bind the model's own projection only where they multiply it as it is; see {@link
+     * MlxPrefillProjections#notBound}. Everything else the producer still reads: the norms, and a
+     * family's biases and Q/K norms.
+     */
+    protected Object[] weightsNotProvidedBySource(int layerIndex) {
+        return mlxPrefill
+                .map(mlx -> MlxPrefillProjections.notBound(mlx, mlxLayerWeights(layerIndex)))
+                .orElse(NO_WEIGHTS);
+    }
+
+    /**
+     * Layer {@code layerIndex}'s projections in the grouping the MLX prefill multiplies them in.
+     * Llama's by default: separate Q, K, V, gate and up tensors.
+     */
+    protected MlxPrefillProjections.LayerWeights mlxLayerWeights(int layerIndex) {
+        return MlxPrefillProjections.LayerWeights.of((TornadoWeights) weights, layerIndex);
+    }
+
+    // @formatter:off
+    /**
+     * {@code layerWeights} split into the ones this graph binds from {@code source}, the graph that
+     * already uploaded them, and the ones it uploads itself: {@code [consumed, uploaded]}.
+     *
+     * <p>{@code consumeFromDevice} only aliases a buffer the producer graph really has. TornadoVM
+     * builds a graph out of its tasks' argument lists, so a weight the producer declares but passes
+     * to no task is never allocated or uploaded there, and consuming it here yields a buffer
+     * nothing ever wrote — silently, with no diagnostic. Whatever {@link
+     * #weightsNotProvidedBySource} names is therefore uploaded here instead. A weight matches by
+     * identity, as a tensor or as its native array.
+     *
+     * @param source the producer graph, or {@code null} when this graph uploads every weight
+     */
+    // @formatter:on
+    protected final Object[][] weightBinding(String source, int layerIndex, Object[] layerWeights) {
+        if (source == null) {
+            return new Object[][] {NO_WEIGHTS, layerWeights};
+        }
+        Object[] notProvided = weightsNotProvidedBySource(layerIndex);
+        List<Object> consumed = new ArrayList<>(layerWeights.length);
+        List<Object> uploaded = new ArrayList<>(notProvided.length);
+        for (Object w : layerWeights) {
+            boolean provided = true;
+            for (Object n : notProvided) {
+                if (n == w) {
+                    provided = false;
+                    break;
+                }
+            }
+            (provided ? consumed : uploaded).add(w);
+        }
+        return new Object[][] {consumed.toArray(), uploaded.toArray()};
+    }
+
+    /**
+     * Binds {@code layerWeights} into {@code graph}: those {@code source} provides consumed from
+     * it, the rest uploaded once ({@link #weightBinding}).
+     */
+    protected final void bindLayerWeights(
+            TaskGraph graph, String source, int layerIndex, Object[] layerWeights) {
+        Object[][] binding = weightBinding(source, layerIndex, layerWeights);
+        if (binding[0].length > 0) {
+            graph.consumeFromDevice(source, binding[0]);
+        }
+        if (binding[1].length > 0) {
+            graph.transferToDevice(
+                    uk.ac.manchester.tornado.api.enums.DataTransferMode.FIRST_EXECUTION,
+                    binding[1]);
+        }
+    }
+
+    private static final Object[] NO_WEIGHTS = new Object[0];
 }

@@ -1,13 +1,17 @@
 package org.beehive.jitllm.backend.tornado.layers.type.q8_0.prefill;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.MlxPrefill;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillKernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupFP16Kernels;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerPagedKvBatchPrefillSimdgroupKernels;
 import org.beehive.jitllm.backend.tornado.layers.BatchPrefillTransformerLayerTaskGraphs;
+import org.beehive.jitllm.backend.tornado.layers.MlxPrefillAttention;
+import org.beehive.jitllm.backend.tornado.layers.MlxPrefillProjections;
 import org.beehive.jitllm.backend.tornado.scheduling.BatchPrefillGemmPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.LlamaState;
@@ -46,6 +50,8 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
     private final LlamaConfiguration config;
     private final KernelContext context = new KernelContext();
     private final int batchSize;
+    private final MlxPrefillAttention mlxAttention;
+    private final MlxPrefillProjections mlxProjections;
     private final List<ImmutableTaskGraph> layerITGs;
     private String lastLayerTaskGraphID;
 
@@ -58,6 +64,30 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         this.weights = weights;
         this.config = config;
         this.batchSize = batchSize;
+        Optional<MlxPrefill> mlx =
+                MlxPrefill.resolve(state.executionPolicy(), weights.dataType(), config);
+        this.mlxAttention =
+                MlxPrefillAttention.ifPresent(
+                        mlx,
+                        state,
+                        context,
+                        batchSize,
+                        config.contextLength(),
+                        config.numberOfHeads(),
+                        config.numberOfKeyValueHeads(),
+                        config.headSize());
+        this.mlxProjections =
+                MlxPrefillProjections.ifPresent(
+                        mlx,
+                        state,
+                        weights,
+                        context,
+                        batchSize,
+                        config.numberOfLayers(),
+                        config.dim(),
+                        config.numberOfHeads() * config.headSize(),
+                        config.kvDim(),
+                        config.hiddenDim());
         this.layerITGs =
                 IntStream.range(0, config.numberOfLayers())
                         .mapToObj(this::createBatchPrefillLayerTaskGraph)
@@ -121,6 +151,12 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
             layer.consumeFromDevice(
                     "batchPrefillLayer_" + (layerIndex - 1), state.workspace.wrapBlockTable);
         }
+        if (mlxAttention != null) {
+            mlxAttention.declare(layer, layerIndex, "batchPrefillLayer_" + (layerIndex - 1));
+        }
+        if (mlxProjections != null) {
+            mlxProjections.declare(layer, layerIndex, "batchPrefillLayer_" + (layerIndex - 1));
+        }
 
         // Per-layer weights: upload once (Q8_0 format)
         layer.transferToDevice(
@@ -151,18 +187,22 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                 dim,
                 config.rmsNormEps());
 
-        // Writes FP32 normalized xb into wrapXbBatch (reused later by flash attention)
-        layer.task(
-                "batch_attn_rms_apply",
-                TransformerBatchPrefillKernels::batchedRmsApplyFP32,
-                context,
-                state.workspace.wrapXbBatch,
-                state.workspace.wrapXBatch,
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                state.workspace.attnScaleBatch,
-                dim);
+        if (mlxProjections != null) {
+            mlxProjections.qkv(layer, layerIndex);
+        } else {
+            // Writes FP32 normalized xb into wrapXbBatch (reused later by flash attention)
+            layer.task(
+                    "batch_attn_rms_apply",
+                    TransformerBatchPrefillKernels::batchedRmsApplyFP32,
+                    context,
+                    state.workspace.wrapXbBatch,
+                    state.workspace.wrapXBatch,
+                    weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+                    state.workspace.attnScaleBatch,
+                    dim);
+        }
 
-        if (simdgroupGemm()) {
+        if (mlxProjections == null && simdgroupGemm()) {
 
             layer.task(
                     "batch_qkv",
@@ -180,7 +220,7 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                     kvDim,
                     batchSize);
 
-        } else {
+        } else if (mlxProjections == null) {
 
             layer.task(
                     "batch_qkv",
@@ -241,7 +281,9 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         }
 
         // Overwrites wrapXbBatch with attention output
-        if (useFp16KVCache()) {
+        if (mlxAttention != null) {
+            mlxAttention.attention(layer, "batch_attention", layerIndex);
+        } else if (useFp16KVCache()) {
             if (simdgroupAttention()) {
                 if (headSize() == 64) {
                     layer.task(
@@ -409,7 +451,9 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
             }
         }
 
-        if (simdgroupGemm()) {
+        if (mlxProjections != null) {
+            mlxProjections.attentionOutput(layer, layerIndex);
+        } else if (simdgroupGemm()) {
 
             layer.task(
                     "batch_attn_out",
@@ -446,7 +490,9 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                 dim,
                 config.rmsNormEps());
 
-        if (simdgroupGemm()) {
+        if (mlxProjections != null) {
+            mlxProjections.ffn(layer, layerIndex);
+        } else if (simdgroupGemm()) {
 
             layer.task(
                     "batch_ffn_gate_up",
@@ -479,7 +525,7 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                     LOCAL_WORK_GROUP_SIZE);
         }
 
-        if (simdgroupGemm()) {
+        if (mlxProjections == null && simdgroupGemm()) {
 
             layer.task(
                     "batch_ffn_down",
@@ -492,7 +538,7 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                     dim,
                     batchSize);
 
-        } else {
+        } else if (mlxProjections == null) {
 
             layer.task(
                     "batch_ffn_down",
@@ -507,6 +553,12 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         }
 
         layer.persistOnDevice(state.workspace.wrapXBatch, keyCache(), valueCache());
+        if (mlxAttention != null) {
+            mlxAttention.persist(layer);
+        }
+        if (mlxProjections != null) {
+            mlxProjections.persist(layer);
+        }
 
         return layer;
     }
@@ -545,17 +597,29 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
         for (int i = 0; i < config.numberOfLayers(); i++) {
             String p = "batchPrefillLayer_" + i + ".";
             scheduler.addWorkerGrid(p + "batch_attn_rms", rmsWorker);
-            scheduler.addWorkerGrid(p + "batch_attn_rms_apply", rmsApplyWorker);
-            scheduler.addWorkerGrid(p + "batch_qkv", qkvWorker);
+            if (mlxProjections != null) {
+                mlxProjections.addGrids(scheduler, p);
+            } else {
+                scheduler.addWorkerGrid(p + "batch_attn_rms_apply", rmsApplyWorker);
+                scheduler.addWorkerGrid(p + "batch_qkv", qkvWorker);
+            }
             scheduler.addWorkerGrid(p + "batch_rope_kv", ropeWorker);
-            scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
-            scheduler.addWorkerGrid(p + "batch_attn_out", matVecDimWorker);
+            if (mlxAttention != null) {
+                mlxAttention.addGrids(scheduler, p, "batch_attention");
+            } else {
+                scheduler.addWorkerGrid(p + "batch_attention", attnWorker);
+            }
+            if (mlxProjections == null) {
+                scheduler.addWorkerGrid(p + "batch_attn_out", matVecDimWorker);
+            }
             scheduler.addWorkerGrid(p + "batch_ffn_rms", rmsWorker);
-            scheduler.addWorkerGrid(p + "batch_ffn_gate_up", matVecHidWorker);
-            scheduler.addWorkerGrid(p + "batch_ffn_down", matVecDimWorker);
+            if (mlxProjections == null) {
+                scheduler.addWorkerGrid(p + "batch_ffn_gate_up", matVecHidWorker);
+                scheduler.addWorkerGrid(p + "batch_ffn_down", matVecDimWorker);
+            }
         }
 
-        if (simdgroupGemm()) {
+        if (simdgroupGemm() && mlxProjections == null) {
             int local = TransformerBatchPrefillSimdgroupKernels.THREADS;
             int tokenTiles = (batchSize + 63) / 64;
             int sgQkvRows = dim + 2 * kvDim;
@@ -574,7 +638,7 @@ public class LlamaQ8_0LayersBatchPrefill implements BatchPrefillTransformerLayer
                 scheduler.addWorkerGrid(p + "batch_ffn_down", sgDim);
             }
         }
-        if (simdgroupAttention()) {
+        if (simdgroupAttention() && mlxAttention == null) {
             WorkerGrid sgAttn =
                     WorkerGridFactory.genericWorker(
                             ((batchSize
