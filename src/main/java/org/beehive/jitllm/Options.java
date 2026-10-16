@@ -127,6 +127,12 @@ public record Options(
         out.println(
                 "  --batch-prefill-size <int>    batched prefill chunk size; requires --with-prefill-decode, must be > 1, enables batched CPU/GPU prefill");
         out.println(
+                "  --devices <list>              split the model's layers across these TornadoVM devices, one pipeline stage each, e.g. 0:0,0:1");
+        out.println(
+                "  --tensor-split <list>         share of layers per --devices entry, e.g. 41,39, default equal");
+        out.println(
+                "  --split-transport <name>      nccl (default, needs a -Pnccl build) or host: how the hidden state moves between devices");
+        out.println(
                 "  --print-taskgraph-chain       print every TaskGraph of the GPU plan and when it runs (stderr)");
         out.println();
     }
@@ -248,6 +254,21 @@ public record Options(
                         case "--echo" -> echo = Boolean.parseBoolean(nextArg);
                         case "--use-tornadovm" -> useTornadovm = Boolean.parseBoolean(nextArg);
                         case "--batch-prefill-size" -> batchPrefillSize = Integer.parseInt(nextArg);
+                        case "--devices" ->
+                                System.setProperty(
+                                        org.beehive.jitllm.runtime.backend.DeviceSplit
+                                                .DEVICES_PROPERTY,
+                                        nextArg);
+                        case "--tensor-split" ->
+                                System.setProperty(
+                                        org.beehive.jitllm.runtime.backend.DeviceSplit
+                                                .SHARES_PROPERTY,
+                                        nextArg);
+                        case "--split-transport" ->
+                                System.setProperty(
+                                        org.beehive.jitllm.runtime.backend.DeviceSplit
+                                                .TRANSPORT_PROPERTY,
+                                        nextArg);
                         default -> require(false, "Unknown option: %s", optionName);
                     }
                 }

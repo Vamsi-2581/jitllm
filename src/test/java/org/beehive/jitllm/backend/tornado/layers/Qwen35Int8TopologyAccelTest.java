@@ -9,7 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import org.beehive.jitllm.backend.tornado.TensorCoreSupport;
-import org.beehive.jitllm.backend.tornado.kernels.Qwen35Int8Kernels;
+import org.beehive.jitllm.backend.tornado.kernels.Int8GemmKernels;
 import org.beehive.jitllm.backend.tornado.tensor.FP32TornadoTensor;
 import org.beehive.jitllm.backend.tornado.tensor.Q4_0TornadoTensor;
 import org.beehive.jitllm.backend.tornado.tensor.Q4_1TornadoTensor;
@@ -362,6 +362,6 @@ public class Qwen35Int8TopologyAccelTest {
             assertTrue(order.indexOf("ffn_up_proj") < order.indexOf("ffn_down_q8"));
             assertTrue(order.indexOf("ffn_down_q8") < order.indexOf("ffn_down_proj"));
         }
-        assertEquals(64, Qwen35Int8Kernels.I8_BK);
+        assertEquals(64, Int8GemmKernels.I8_BK);
     }
 }

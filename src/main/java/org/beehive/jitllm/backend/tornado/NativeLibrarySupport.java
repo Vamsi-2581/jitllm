@@ -3,11 +3,11 @@ package org.beehive.jitllm.backend.tornado;
 import java.util.Optional;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.plan.ExecutionMode;
+import org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry;
 import org.beehive.jitllm.model.Model;
 import org.beehive.jitllm.runtime.backend.BackendId;
 import org.beehive.jitllm.runtime.diagnostics.DiagnosticCode;
 import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
-import org.beehive.jitllm.runtime.tensor.DataType;
 
 /**
  * Where vendor native libraries ({@code --with-native-libraries}) have an implementation.
@@ -33,17 +33,19 @@ public final class NativeLibrarySupport {
         if (!BackendId.CUDA.equals(c.backend())) {
             return Optional.of("native libraries are implemented on CUDA only");
         }
-        boolean qwen3 = c.architecture().equals("qwen3") && c.weights() == DataType.F16;
-        boolean gemma4 =
-                c.architecture().equals("gemma4")
-                        && (c.weights() == DataType.Q8_0 || c.weights() == DataType.Q4_0);
-        if (!qwen3 && !gemma4) {
+        boolean implemented =
+                TornadoPlanRegistry.provider(c.architecture())
+                        .map(provider -> provider.nativeLibraryWeights().contains(c.weights()))
+                        .orElse(false);
+        if (!implemented) {
             return Optional.of(
                     "no native-library path is implemented for "
                             + c.architecture()
                             + " / "
                             + c.weights()
-                            + " yet (Qwen3 F16 and Gemma 4 Q8_0/Q4_0 only)");
+                            + " yet ("
+                            + TornadoPlanRegistry.nativeLibraryPaths()
+                            + " only)");
         }
         if (c.mode() != ExecutionMode.BATCH_PREFILL_DECODE) {
             return Optional.of(

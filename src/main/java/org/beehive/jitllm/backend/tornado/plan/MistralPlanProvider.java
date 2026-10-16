@@ -1,6 +1,8 @@
 package org.beehive.jitllm.backend.tornado.plan;
 
+import java.util.Optional;
 import java.util.Set;
+import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.lowering.TornadoSupportSets;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.fp16.MistralFP16PlanComponents;
@@ -27,6 +29,12 @@ public final class MistralPlanProvider implements TornadoPlanProvider {
         return ID;
     }
 
+    /** The FP16 and Q8_0 logits sample on the device; a Q4_0 file's logits are the Q8_0 layer. */
+    @Override
+    public boolean deviceSampling(DataType weights) {
+        return weights == DataType.F16 || weights == DataType.Q8_0 || weights == DataType.Q4_0;
+    }
+
     @Override
     public Set<DataType> supportedDataTypes() {
         return TornadoSupportSets.BOTH_REPRESENTATIONS;
@@ -34,7 +42,7 @@ public final class MistralPlanProvider implements TornadoPlanProvider {
 
     @Override
     public Set<ExecutionMode> supportedModes() {
-        return TornadoSupportSets.STANDARD_ONLY;
+        return TornadoSupportSets.STANDARD_AND_BATCH;
     }
 
     @Override
@@ -43,5 +51,32 @@ public final class MistralPlanProvider implements TornadoPlanProvider {
         return weights == DataType.F16
                 ? new MistralFP16PlanComponents(typed, model)
                 : new MistralQ8_0PlanComponents(typed, model);
+    }
+
+    /**
+     * Mistral keeps the non-NVIDIA scheduler for its FP32 attention; its FP16 cache takes the flash
+     * kernels, which need an NVIDIA-class device, not that scheduler.
+     */
+    @Override
+    public Optional<String> fp16KeyValueUnsupported(Combination c) {
+        if (!c.nvidiaDevice()) {
+            return Optional.of("the FP16 flash kernels need an NVIDIA-class device");
+        }
+        if (c.weights() != DataType.F16 && c.weights() != DataType.Q8_0) {
+            return Optional.of("the " + c.weights() + " layers keep an FP32 cache");
+        }
+        // Batched plans run Llama's layers, prefill and decode, which write the FP16 cache too.
+        return c.mode() == ExecutionMode.PREFILL_DECODE
+                ? Optional.of("mistral's sequential prefill/decode plan keeps an FP32 cache")
+                : Optional.empty();
+    }
+
+    /**
+     * The batched prefill's projections through cuBLAS: Q8_0 weights decoded to FP16 first; F16
+     * weights' output and down projections.
+     */
+    @Override
+    public Set<DataType> nativeLibraryWeights() {
+        return Set.of(DataType.Q8_0, DataType.F16);
     }
 }

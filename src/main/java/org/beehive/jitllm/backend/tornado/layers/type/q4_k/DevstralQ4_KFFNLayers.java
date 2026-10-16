@@ -52,18 +52,29 @@ public class DevstralQ4_KFFNLayers
         var layerTaskGraphName = "layer_" + layerIndex;
         TaskGraph unifiedLayer = new TaskGraph(layerTaskGraphName);
 
-        unifiedLayer.consumeFromDevice(state.workspace.wrapX);
-        unifiedLayer.transferToDevice(
-                DataTransferMode.FIRST_EXECUTION,
-                weights.rms_att_weightLayered[layerIndex].asFloatArray(),
-                weights.wqLayered[layerIndex].asByteArray(),
-                weights.wkLayered[layerIndex].asByteArray(),
-                weights.wvLayered[layerIndex].asByteArray(),
-                weights.woLayered[layerIndex].asByteArray(),
-                weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
-                weights.w1Layered[layerIndex].asByteArray(),
-                weights.w2Layered[layerIndex].asByteArray(),
-                weights.w3Layered[layerIndex].asByteArray());
+        String wrapXSrc = predecessorGraphName(layerIndex);
+        if (wrapXSrc != null) {
+            unifiedLayer.consumeFromDevice(wrapXSrc, state.workspace.wrapX);
+        } else {
+            unifiedLayer.consumeFromDevice(state.workspace.wrapX);
+        }
+        Object[] layerWeights = {
+            weights.rms_att_weightLayered[layerIndex].asFloatArray(),
+            weights.wqLayered[layerIndex].asByteArray(),
+            weights.wkLayered[layerIndex].asByteArray(),
+            weights.wvLayered[layerIndex].asByteArray(),
+            weights.woLayered[layerIndex].asByteArray(),
+            weights.rms_ffn_weightLayered[layerIndex].asFloatArray(),
+            weights.w1Layered[layerIndex].asByteArray(),
+            weights.w2Layered[layerIndex].asByteArray(),
+            weights.w3Layered[layerIndex].asByteArray()
+        };
+        String weightSrc = weightSourceGraphName(layerIndex);
+        if (weightSrc != null) {
+            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
+        } else {
+            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
+        }
         unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
 
         unifiedLayer.task(
@@ -124,24 +135,45 @@ public class DevstralQ4_KFFNLayers
                 config.kvDim());
 
         // Use precomputed RoPE frequencies (YaRN-scaled)
-        unifiedLayer.task(
-                "rope_and_kv_cache",
-                TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedPaged,
-                context,
-                state.workspace.positionHolder,
-                state.workspace.wrapQ,
-                state.workspace.wrapK,
-                state.workspace.wrapV,
-                state.workspace.wrapKeyCache,
-                state.workspace.wrapValueCache,
-                weights.freq_cis_realFlat.asFloatArray(),
-                weights.freq_cis_imagFlat.asFloatArray(),
-                config.kvDim(),
-                config.headSize(),
-                layerIndex,
-                state.workspace.wrapBlockTable,
-                state.kvBlockCfg,
-                state.kvBlockStride);
+        if (useFp16KVCache()) {
+            unifiedLayer.task(
+                    "rope_and_kv_cache",
+                    TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedFP16Paged,
+                    context,
+                    state.workspace.positionHolder,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapK,
+                    state.workspace.wrapV,
+                    state.workspace.wrapKeyCacheFP16,
+                    state.workspace.wrapValueCacheFP16,
+                    weights.freq_cis_realFlat.asFloatArray(),
+                    weights.freq_cis_imagFlat.asFloatArray(),
+                    config.kvDim(),
+                    config.headSize(),
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride);
+        } else {
+            unifiedLayer.task(
+                    "rope_and_kv_cache",
+                    TransformerPagedKvKernels::ropeRotationWithCacheCopyPrecomputedPaged,
+                    context,
+                    state.workspace.positionHolder,
+                    state.workspace.wrapQ,
+                    state.workspace.wrapK,
+                    state.workspace.wrapV,
+                    state.workspace.wrapKeyCache,
+                    state.workspace.wrapValueCache,
+                    weights.freq_cis_realFlat.asFloatArray(),
+                    weights.freq_cis_imagFlat.asFloatArray(),
+                    config.kvDim(),
+                    config.headSize(),
+                    layerIndex,
+                    state.workspace.wrapBlockTable,
+                    state.kvBlockCfg,
+                    state.kvBlockStride);
+        }
 
         configureAttention(unifiedLayer, layerIndex);
 
@@ -223,6 +255,28 @@ public class DevstralQ4_KFFNLayers
         return unifiedLayer;
     }
 
+    /** The key cache in the representation the state holds: FP16 where it allocated one. */
+    protected Object keyCache() {
+        return useFp16KVCache() ? state.workspace.wrapKeyCacheFP16 : state.workspace.wrapKeyCache;
+    }
+
+    /** The value cache in the representation the state holds. */
+    protected Object valueCache() {
+        return useFp16KVCache()
+                ? state.workspace.wrapValueCacheFP16
+                : state.workspace.wrapValueCache;
+    }
+
+    /** The graph whose {@code wrapX} this layer reads, or {@code null} for the unnamed consume. */
+    protected String predecessorGraphName(int layerIndex) {
+        return null;
+    }
+
+    /** The graph that has already uploaded this layer's weights, or {@code null} to upload here. */
+    protected String weightSourceGraphName(int layerIndex) {
+        return null;
+    }
+
     protected TaskGraph configureLayerDataTransfers(TaskGraph unifiedLayer, int layerIndex) {
         if (layerIndex == 0) {
             unifiedLayer.transferToDevice(
@@ -238,8 +292,8 @@ public class DevstralQ4_KFFNLayers
                     state.workspace.wrapQ,
                     state.workspace.wrapK,
                     state.workspace.wrapV,
-                    state.workspace.wrapKeyCache,
-                    state.workspace.wrapValueCache,
+                    keyCache(),
+                    valueCache(),
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
                     state.workspace.wrapHb2,
@@ -258,8 +312,8 @@ public class DevstralQ4_KFFNLayers
                     state.workspace.wrapQ,
                     state.workspace.wrapK,
                     state.workspace.wrapV,
-                    state.workspace.wrapKeyCache,
-                    state.workspace.wrapValueCache,
+                    keyCache(),
+                    valueCache(),
                     state.workspace.wrapAtt,
                     state.workspace.wrapHb,
                     state.workspace.wrapHb2,
@@ -433,6 +487,25 @@ public class DevstralQ4_KFFNLayers
 
     private TaskGraph configureAttention(TaskGraph unifiedLayer, int layerIndex) {
         if (schedulerType == SchedulerType.NVIDIA) {
+            if (useFp16KVCache()) {
+                return unifiedLayer.task(
+                        "attention",
+                        TransformerPagedKvKernels::processHeadsFlashAttentionFP16Paged,
+                        context,
+                        state.workspace.wrapQ,
+                        state.workspace.wrapKeyCacheFP16,
+                        state.workspace.wrapValueCacheFP16,
+                        state.workspace.wrapXb,
+                        config.numberOfHeads(),
+                        config.headSize(),
+                        config.kvDim(),
+                        config.kvMul(),
+                        state.workspace.positionHolder,
+                        layerIndex,
+                        state.workspace.wrapBlockTable,
+                        state.kvBlockCfg,
+                        state.kvBlockStride);
+            }
             return unifiedLayer.task(
                     "attention",
                     TransformerPagedKvKernels::processHeadsFlashAttentionPaged,

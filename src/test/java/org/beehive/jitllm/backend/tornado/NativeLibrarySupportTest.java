@@ -59,22 +59,90 @@ public class NativeLibrarySupportTest {
     }
 
     @Test
-    public void everythingElseIsRefused() {
+    public void llamaQ4_0BatchedPrefillOnTensorCoresIsImplemented() {
+        assertEquals(
+                Optional.empty(),
+                check(
+                        "llama",
+                        DataType.Q4_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.CUDA,
+                        true));
         assertTrue(
                 check(
                                 "llama",
-                                DataType.F16,
+                                DataType.Q4_0,
+                                ExecutionMode.BATCH_PREFILL_DECODE,
+                                BackendId.CUDA,
+                                false)
+                        .isPresent());
+        assertTrue(
+                check("llama", DataType.Q4_0, ExecutionMode.STANDARD, BackendId.CUDA, true)
+                        .isPresent());
+    }
+
+    @Test
+    public void qwen35Q8_0BatchedPrefillOnTensorCoresIsImplemented() {
+        assertEquals(
+                Optional.empty(),
+                check(
+                        "qwen35",
+                        DataType.Q8_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.CUDA,
+                        true));
+        assertTrue(
+                check(
+                                "qwen35",
+                                DataType.Q4_0,
+                                ExecutionMode.BATCH_PREFILL_DECODE,
+                                BackendId.CUDA,
+                                true)
+                        .isPresent());
+    }
+
+    @Test
+    public void decodedWeightProjectionsOnTensorCoresAreImplemented() {
+        for (String family : new String[] {"llama", "qwen2", "phi3", "granite", "mistral"}) {
+            for (DataType weights : new DataType[] {DataType.Q8_0, DataType.F16}) {
+                assertEquals(
+                        family + " " + weights,
+                        Optional.empty(),
+                        check(
+                                family,
+                                weights,
+                                ExecutionMode.BATCH_PREFILL_DECODE,
+                                BackendId.CUDA,
+                                true));
+            }
+        }
+        assertEquals(
+                Optional.empty(),
+                check(
+                        "qwen3",
+                        DataType.Q8_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.CUDA,
+                        true));
+    }
+
+    @Test
+    public void everythingElseIsRefused() {
+        assertTrue(
+                check(
+                                "qwen3",
+                                DataType.Q4_0,
                                 ExecutionMode.BATCH_PREFILL_DECODE,
                                 BackendId.CUDA,
                                 true)
                         .isPresent());
         assertTrue(
                 check(
-                                "qwen3",
-                                DataType.Q8_0,
+                                "llama",
+                                DataType.F16,
                                 ExecutionMode.BATCH_PREFILL_DECODE,
                                 BackendId.CUDA,
-                                true)
+                                false)
                         .isPresent());
         assertTrue(
                 check("qwen3", DataType.F16, ExecutionMode.STANDARD, BackendId.CUDA, true)

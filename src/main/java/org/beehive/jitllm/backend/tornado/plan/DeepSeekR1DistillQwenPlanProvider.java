@@ -1,6 +1,9 @@
 package org.beehive.jitllm.backend.tornado.plan;
 
+import java.util.Optional;
 import java.util.Set;
+import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport;
+import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
 import org.beehive.jitllm.backend.tornado.lowering.TornadoSupportSets;
 import org.beehive.jitllm.backend.tornado.plan.components.SingleTokenForwardPlanComponents;
 import org.beehive.jitllm.backend.tornado.plan.components.fp16.Qwen2FP16PlanComponents;
@@ -28,7 +31,7 @@ public final class DeepSeekR1DistillQwenPlanProvider implements TornadoPlanProvi
 
     @Override
     public Set<ExecutionMode> supportedModes() {
-        return TornadoSupportSets.STANDARD_ONLY;
+        return TornadoSupportSets.STANDARD_AND_BATCH;
     }
 
     @Override
@@ -37,5 +40,20 @@ public final class DeepSeekR1DistillQwenPlanProvider implements TornadoPlanProvi
         return weights == DataType.F16
                 ? new Qwen2FP16PlanComponents(typed, model)
                 : new Qwen2Q8_0PlanComponents(typed, model);
+    }
+
+    /** Qwen2's: single-token and batched-prefill plans, on the NVIDIA-class decode layers. */
+    @Override
+    public Optional<String> fp16KeyValueUnsupported(Combination c) {
+        return Fp16KeyValueSupport.singleTokenAndBatchedNvidiaLayers(c);
+    }
+
+    /**
+     * The batched prefill's projections through cuBLAS: Q8_0 weights decoded to FP16 first; F16
+     * weights' output and down projections.
+     */
+    @Override
+    public Set<DataType> nativeLibraryWeights() {
+        return Set.of(DataType.Q8_0, DataType.F16);
     }
 }

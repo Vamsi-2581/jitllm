@@ -1,13 +1,17 @@
 package org.beehive.jitllm.backend.tornado.layers;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.IntStream;
+import org.beehive.jitllm.backend.tornado.device.TornadoDevices;
 import org.beehive.jitllm.backend.tornado.kernels.TransformerComputeKernelsLayered;
+import org.beehive.jitllm.backend.tornado.scheduling.LaneAttentionPolicy;
 import org.beehive.jitllm.backend.tornado.scheduling.SchedulerType;
 import org.beehive.jitllm.backend.tornado.scheduling.WorkerGridFactory;
 import org.beehive.jitllm.inference.state.State;
 import org.beehive.jitllm.inference.weights.Weights;
 import org.beehive.jitllm.model.Configuration;
+import org.beehive.jitllm.runtime.backend.BackendId;
 import uk.ac.manchester.tornado.api.ImmutableTaskGraph;
 import uk.ac.manchester.tornado.api.KernelContext;
 import uk.ac.manchester.tornado.api.TaskGraph;
@@ -57,8 +61,114 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
     /** Creates the {@link ImmutableTaskGraph} list for each transformer layer. */
     protected void setupFFNLayers() {
         int numLayers = config.numberOfLayers();
+        int perGraph = layersPerGraph();
+        if (perGraph <= 1) {
+            this.ffnLayerITGs =
+                    IntStream.range(firstLayer, endLayer(numLayers))
+                            .mapToObj(this::setupFFNLayer)
+                            .toList();
+            return;
+        }
+        int end = endLayer(numLayers);
+        List<ImmutableTaskGraph> graphs =
+                new ArrayList<>((end - firstLayer + perGraph - 1) / perGraph);
+        for (int first = firstLayer; first < end; first += perGraph) {
+            int last = Math.min(first + perGraph, end) - 1;
+            TaskGraph graph = null;
+            for (int layer = first; layer <= last; layer++) {
+                graph = appendFFNLayer(graph, layer);
+            }
+            lastFFNLayerTaskGraphID = graph.getTaskGraphName();
+            graphs.add(graph.snapshot());
+        }
+        this.ffnLayerITGs = List.copyOf(graphs);
+    }
 
-        this.ffnLayerITGs = IntStream.range(0, numLayers).mapToObj(this::setupFFNLayer).toList();
+    // @formatter:off
+    /**
+     * How many adjacent transformer layers one layer graph holds.
+     *
+     * <p>One by default. A family that returns more gets the same tasks, in the same order, over
+     * the same buffers, submitted in fewer graphs, and since every graph submission ends in a
+     * device wait, fewer of them is the point. Such a family implements {@link #appendFFNLayer},
+     * names its graphs and tasks through {@link #layerGraphName} and {@link #layerTaskPrefix}, and
+     * binds the buffers shared with the previous graph only in the layer that opens a graph. Groups
+     * start at the stack's first layer, so a pipeline stage's groups never cross into the next
+     * stage. Not user-settable: the grouping is a property of a family's plan.
+     */
+    // @formatter:on
+    protected int layersPerGraph() {
+        return 1;
+    }
+
+    /** The graph holding {@code layerIndex}, named for the first layer in it. */
+    protected String layerGraphName(int layerIndex) {
+        return "layer_" + (layerIndex - (layerIndex - firstLayer) % layersPerGraph());
+    }
+
+    /**
+     * What keeps the layers of one graph from claiming each other's task names. A grid key is
+     * {@code graphName.taskName}; the first layer of a graph keeps the bare names, so an ungrouped
+     * graph's keys are the ones it always had.
+     */
+    protected String layerTaskPrefix(int layerIndex) {
+        int slot = (layerIndex - firstLayer) % layersPerGraph();
+        return slot == 0 ? "" : "l" + slot + "_";
+    }
+
+    /** Whether {@code layerIndex} opens its graph, and so binds what the graph shares. */
+    protected boolean opensGraph(int layerIndex) {
+        return (layerIndex - firstLayer) % layersPerGraph() == 0;
+    }
+
+    /**
+     * Layer {@code layerIndex}'s tasks, in a new graph when {@code existing} is null and appended
+     * to {@code existing} otherwise. Implemented by the families whose {@link #layersPerGraph} is
+     * more than one.
+     */
+    protected TaskGraph appendFFNLayer(TaskGraph existing, int layerIndex) {
+        throw new UnsupportedOperationException(
+                getClass().getSimpleName() + " builds one layer per graph");
+    }
+
+    /**
+     * First layer this stack builds. Zero unless the stack is one stage of a pipeline split across
+     * devices, in which case it builds layers {@code [firstLayer, endLayer)}.
+     */
+    protected int firstLayer = 0;
+
+    /** One past the last layer this stack builds, or -1 for every remaining layer. */
+    protected int endLayer = -1;
+
+    /**
+     * Restricts this stack to layers {@code [first, end)}. Called by a subclass constructor before
+     * {@link #setupFFNLayers()}.
+     */
+    protected void restrictToLayers(int first, int end) {
+        if (first < 0 || end > config.numberOfLayers() || first >= end) {
+            throw new IllegalArgumentException(
+                    "layer range ["
+                            + first
+                            + ", "
+                            + end
+                            + ") outside the model's "
+                            + config.numberOfLayers()
+                            + " layers");
+        }
+        this.firstLayer = first;
+        this.endLayer = end;
+    }
+
+    protected int endLayer(int numLayers) {
+        return endLayer < 0 ? numLayers : endLayer;
+    }
+
+    /**
+     * The index a layer uses in the key/value cache. A stage's cache holds only its own layers, so
+     * the index is relative to the first one.
+     */
+    protected int keyValueLayer(int layerIndex) {
+        return layerIndex - firstLayer;
     }
 
     /**
@@ -69,7 +179,7 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
     private ImmutableTaskGraph setupFFNLayer(int layerIndex) {
         TaskGraph tg = createFFNLayerTaskGraph(layerIndex);
 
-        if (layerIndex == config.numberOfLayers() - 1) {
+        if (layerIndex == endLayer(config.numberOfLayers()) - 1) {
             lastFFNLayerTaskGraphID = tg.getTaskGraphName();
         }
 
@@ -136,11 +246,29 @@ public abstract class AbstractTransformerLayerTaskGraphs<W extends Weights, C ex
 
     /**
      * Whether this layer stack should use the half-precision KV cache: requested via {@code
-     * -Djitllm.kvcache.fp16=true}, allocated by the model state, and running on the NVIDIA path
-     * (the FP16 kernels rely on packed half2 codegen in the CUDA backend). The packed accessors
-     * need even element indices, which holds for the (even) headSize/kvDim of the supported models.
+     * -Djitllm.kvcache.fp16=true}, allocated by the model state, and running on the NVIDIA path or
+     * on Metal, where the FP16 kernels each family selects were checked against FP32 ({@code
+     * GpuFp16Kv*AccelTest}). The packed accessors need even element indices, which holds for the
+     * (even) headSize/kvDim of the supported models.
      */
     protected boolean useFp16KVCache() {
-        return state.usesFp16KeyValueCache() && schedulerType == SchedulerType.NVIDIA;
+        return state.usesFp16KeyValueCache()
+                && (schedulerType == SchedulerType.NVIDIA || metalBackend());
+    }
+
+    /** Whether the plan runs on the Metal backend. */
+    protected static boolean metalBackend() {
+        return TornadoDevices.current().backend().equals(BackendId.METAL);
+    }
+
+    /**
+     * Whether split-KV decode attention runs the lane-cooperative kernel for {@code headSize}: an
+     * FP16 cache on the NVIDIA path, no request for the packed-half2 variant, and a head width
+     * {@link LaneAttentionPolicy} has a kernel for. The policy also picks that kernel and its grid.
+     */
+    protected boolean laneAttention(int headSize) {
+        return useFp16KVCache()
+                && !packedHalf2Attention
+                && LaneAttentionPolicy.laneCooperativeAttention(headSize);
     }
 }
