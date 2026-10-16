@@ -83,17 +83,66 @@ public final class MlxPrefillKernels {
     }
 
     /**
-     * The largest magnitude {@link #swigluScaled} lets a row of the down projection's input reach:
-     * low enough that the down GEMM's FP16 products stay finite, high enough that ordinary rows are
-     * not scaled at all.
+     * The largest magnitude {@link #toHalfScaled} and {@link #swigluScaled} let a row of a
+     * projection's input reach: low enough that the GEMM's FP16 products stay finite, high enough
+     * that ordinary rows are not scaled at all.
      */
-    public static final float DOWN_INPUT_LIMIT = 256.0f;
+    public static final float PROJECTION_INPUT_LIMIT = 256.0f;
 
     /**
-     * {@code rowScale[b] = min(1, DOWN_INPUT_LIMIT / max_i |SiLU(gate[b][i]) * up[b][i]|)}: the
-     * factor that keeps row {@code b} of the down projection, input and product, inside FP16. Some
-     * tokens (the first, in Granite 4.0) carry activations past FP16's 65504 there. One workgroup
-     * of {@code localSize} threads per row, over {@code rows} rows.
+     * {@code rowScale[b] = min(1, PROJECTION_INPUT_LIMIT / max_i |in[b][i]|)}: the factor that
+     * keeps row {@code b} of a projection, input and product, inside FP16. One workgroup of {@code
+     * localSize} threads per row of {@code width}, over {@code rows} rows.
+     */
+    public static void rowScale(
+            KernelContext context,
+            FloatArray in,
+            FloatArray rowScale,
+            int width,
+            int rows,
+            int localSize) {
+        int tid = context.localIdx;
+        int b = context.groupIdx;
+        float[] partial = context.allocateFloatLocalArray(localSize);
+        float max = 0.0f;
+        if (b < rows) {
+            for (int i = tid; i < width; i += localSize) {
+                max = TornadoMath.max(max, TornadoMath.abs(in.get(b * width + i)));
+            }
+        }
+        partial[tid] = max;
+        context.localBarrier();
+        for (int s = localSize / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                partial[tid] = TornadoMath.max(partial[tid], partial[tid + s]);
+            }
+            context.localBarrier();
+        }
+        if (tid == 0 && b < rows) {
+            float peak = partial[0];
+            rowScale.set(b, peak > PROJECTION_INPUT_LIMIT ? PROJECTION_INPUT_LIMIT / peak : 1.0f);
+        }
+    }
+
+    /** {@code out[b][i] = FP16(in[b][i] * rowScale[b])}: {@link #toHalf} with {@link #rowScale}. */
+    public static void toHalfScaled(
+            KernelContext context,
+            FloatArray in,
+            HalfFloatArray out,
+            FloatArray rowScale,
+            int width,
+            int total) {
+        int id = context.globalIdx;
+        if (id < total) {
+            out.set(id, new HalfFloat(in.get(id) * rowScale.get(id / width)));
+        }
+    }
+
+    /**
+     * {@code rowScale[b] = min(1, PROJECTION_INPUT_LIMIT / max_i |SiLU(gate[b][i]) * up[b][i]|)}:
+     * the factor that keeps row {@code b} of the down projection, input and product, inside FP16.
+     * Some tokens (the first, in Granite 4.0) carry activations past FP16's 65504 there. One
+     * workgroup of {@code localSize} threads per row, over {@code rows} rows.
      */
     public static void swigluRowScale(
             KernelContext context,
@@ -124,7 +173,7 @@ public final class MlxPrefillKernels {
         }
         if (tid == 0 && b < rows) {
             float peak = partial[0];
-            rowScale.set(b, peak > DOWN_INPUT_LIMIT ? DOWN_INPUT_LIMIT / peak : 1.0f);
+            rowScale.set(b, peak > PROJECTION_INPUT_LIMIT ? PROJECTION_INPUT_LIMIT / peak : 1.0f);
         }
     }
 
@@ -148,8 +197,8 @@ public final class MlxPrefillKernels {
     }
 
     /**
-     * {@code x[b][i] += scale * y[b][i] / rowScale[b]}: {@link #addResidual} undoing {@link
-     * #swigluScaled}'s row factor in FP32.
+     * {@code x[b][i] += scale * y[b][i] / rowScale[b]}: {@link #addResidual} undoing the row factor
+     * of {@link #toHalfScaled} or {@link #swigluScaled} in FP32.
      */
     public static void addRowScaledResidual(
             KernelContext context,

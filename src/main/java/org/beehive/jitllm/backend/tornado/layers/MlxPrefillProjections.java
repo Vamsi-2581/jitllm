@@ -55,7 +55,7 @@ public final class MlxPrefillProjections {
 
     private static final int GROUP = MlxPrefill.GROUP;
 
-    /** Threads per row of {@link MlxPrefillKernels#swigluRowScale}. */
+    /** Threads per row of the row-scale reductions. */
     private static final int ROW_THREADS = 256;
 
     /** One projection's weights in MLX's form: FP16, or affine-quantized. */
@@ -91,6 +91,7 @@ public final class MlxPrefillProjections {
     private final HalfFloatArray outHalf; // B × dim
     private final HalfFloatArray gateUpHalf; // B × 2·hidden
     private final HalfFloatArray hbHalf; // B × hidden
+    private final FloatArray attnRowScale; // B
     private final FloatArray downRowScale; // B
 
     /**
@@ -336,6 +337,7 @@ public final class MlxPrefillProjections {
         this.outHalf = new HalfFloatArray(batchSize * dim);
         this.gateUpHalf = new HalfFloatArray(batchSize * 2 * hidden);
         this.hbHalf = new HalfFloatArray(batchSize * hidden);
+        this.attnRowScale = new FloatArray(batchSize);
         this.downRowScale = new FloatArray(batchSize);
     }
 
@@ -450,7 +452,9 @@ public final class MlxPrefillProjections {
      * Declares the shared FP16 buffers and this layer's weights in layer graph {@code layerIndex}.
      */
     public void declare(TaskGraph layer, int layerIndex, String predecessor) {
-        Object[] buffers = {xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf, downRowScale};
+        Object[] buffers = {
+            xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf, attnRowScale, downRowScale
+        };
         if (layerIndex == 0) {
             layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, buffers);
         } else {
@@ -495,23 +499,40 @@ public final class MlxPrefillProjections {
                 batchSize * (qDim + 2 * kvDim));
     }
 
-    /** The output projection of {@code wrapXbBatch}, added into {@code wrapXBatch}. */
+    /**
+     * The output projection of {@code wrapXbBatch}, added into {@code wrapXBatch}. A row that would
+     * overflow FP16 in the GEMM is scaled into range first, and the scale is undone in the FP32
+     * residual add.
+     */
     public void attentionOutput(TaskGraph layer, int layerIndex) {
         layer.task(
+                "batch_attn_row_scale",
+                MlxPrefillKernels::rowScale,
+                context,
+                state.workspace.wrapXbBatch,
+                attnRowScale,
+                qDim,
+                batchSize,
+                ROW_THREADS);
+        layer.task(
                 "batch_attn_half",
-                MlxPrefillKernels::toHalf,
+                MlxPrefillKernels::toHalfScaled,
                 context,
                 state.workspace.wrapXbBatch,
                 attnHalf,
+                attnRowScale,
+                qDim,
                 batchSize * qDim);
         gemm(layer, "batch_attn_out", attnHalf, wo[layerIndex], outHalf, qDim, dim);
         layer.task(
                 "batch_attn_residual",
-                MlxPrefillKernels::addResidual,
+                MlxPrefillKernels::addRowScaledResidual,
                 context,
                 state.workspace.wrapXBatch,
                 outHalf,
+                attnRowScale,
                 residualScale,
+                dim,
                 batchSize * dim);
     }
 
@@ -592,21 +613,26 @@ public final class MlxPrefillProjections {
 
     /** Keeps the shared buffers on the device for the next layer graph. */
     public void persist(TaskGraph layer) {
-        layer.persistOnDevice(xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf, downRowScale);
+        layer.persistOnDevice(
+                xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf, attnRowScale, downRowScale);
     }
 
     /** The grids of this helper's kernels, under graph-qualified prefix {@code p}. */
     public void addGrids(GridScheduler scheduler, String p) {
         scheduler.addWorkerGrid(p + "batch_attn_rms_apply", elementwise(batchSize * dim));
         scheduler.addWorkerGrid(p + "batch_qkv_split", elementwise(batchSize * (qDim + 2 * kvDim)));
+        scheduler.addWorkerGrid(p + "batch_attn_row_scale", rowWorker());
         scheduler.addWorkerGrid(p + "batch_attn_half", elementwise(batchSize * qDim));
         scheduler.addWorkerGrid(p + "batch_attn_residual", elementwise(batchSize * dim));
         scheduler.addWorkerGrid(p + "batch_ffn_rms_apply", elementwise(batchSize * dim));
-        scheduler.addWorkerGrid(
-                p + "batch_ffn_row_scale",
-                WorkerGridFactory.genericWorker(batchSize * ROW_THREADS, ROW_THREADS));
+        scheduler.addWorkerGrid(p + "batch_ffn_row_scale", rowWorker());
         scheduler.addWorkerGrid(p + "batch_ffn_swiglu", elementwise(batchSize * hidden));
         scheduler.addWorkerGrid(p + "batch_ffn_residual", elementwise(batchSize * dim));
+    }
+
+    /** One workgroup of {@link #ROW_THREADS} per token row. */
+    private WorkerGrid rowWorker() {
+        return WorkerGridFactory.genericWorker(batchSize * ROW_THREADS, ROW_THREADS);
     }
 
     private static WorkerGrid elementwise(int total) {
