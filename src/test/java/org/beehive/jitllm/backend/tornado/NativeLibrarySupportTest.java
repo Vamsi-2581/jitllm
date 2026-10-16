@@ -171,6 +171,113 @@ public class NativeLibrarySupportTest {
                         .isPresent());
     }
 
+    // ── Metal: each provider declares what its MLX prefill implements ──────────
+
+    @Test
+    public void mlxFamiliesAreAdmittedOnMetalForTheWeightsTheirProvidersDeclare() {
+        for (String family :
+                new String[] {
+                    "llama",
+                    "mistral",
+                    "qwen2",
+                    "deepseek-r1-distill-qwen",
+                    "qwen3",
+                    "phi3",
+                    "granite"
+                }) {
+            for (DataType weights : new DataType[] {DataType.F16, DataType.Q8_0}) {
+                assertEquals(
+                        family + " " + weights,
+                        Optional.empty(),
+                        check(
+                                family,
+                                weights,
+                                ExecutionMode.BATCH_PREFILL_DECODE,
+                                BackendId.METAL,
+                                false));
+            }
+        }
+        assertEquals(
+                "llama retains Q4_0 and has an MLX path for it",
+                Optional.empty(),
+                check(
+                        "llama",
+                        DataType.Q4_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.METAL,
+                        false));
+    }
+
+    @Test
+    public void onMetalWhatNoProviderDeclaresIsRefused() {
+        // Q4_0 for a family whose provider lists no Q4_0 MLX path, and families with none at all.
+        for (String family : new String[] {"qwen3", "qwen2", "phi3", "granite", "mistral"}) {
+            Optional<String> reason =
+                    check(
+                            family,
+                            DataType.Q4_0,
+                            ExecutionMode.BATCH_PREFILL_DECODE,
+                            BackendId.METAL,
+                            false);
+            assertTrue(family + " Q4_0", reason.isPresent());
+            assertTrue(reason.get(), reason.get().contains("on metal"));
+        }
+        for (String family : new String[] {"devstral", "gemma4", "qwen35", "qwen2-moe"}) {
+            for (DataType weights : new DataType[] {DataType.F16, DataType.Q8_0, DataType.Q4_0}) {
+                assertTrue(
+                        family + " " + weights,
+                        check(
+                                        family,
+                                        weights,
+                                        ExecutionMode.BATCH_PREFILL_DECODE,
+                                        BackendId.METAL,
+                                        false)
+                                .isPresent());
+            }
+        }
+    }
+
+    @Test
+    public void onMetalOnlyTheBatchedPrefillRunsOnMlx() {
+        for (ExecutionMode mode :
+                new ExecutionMode[] {ExecutionMode.STANDARD, ExecutionMode.PREFILL_DECODE}) {
+            Optional<String> reason = check("llama", DataType.F16, mode, BackendId.METAL, false);
+            assertTrue(mode.toString(), reason.isPresent());
+            assertTrue(reason.get(), reason.get().contains("--batch-prefill-size"));
+        }
+    }
+
+    @Test
+    public void theMetalCapabilityIsNotTheCudaOne() {
+        // Gemma 4 has a cuBLAS path for Q8_0 and none on MLX; Llama has both.
+        assertEquals(
+                Optional.empty(),
+                check(
+                        "gemma4",
+                        DataType.Q8_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.CUDA,
+                        true));
+        assertTrue(
+                check(
+                                "gemma4",
+                                DataType.Q8_0,
+                                ExecutionMode.BATCH_PREFILL_DECODE,
+                                BackendId.METAL,
+                                false)
+                        .isPresent());
+        assertEquals(
+                java.util.Set.of(DataType.F16, DataType.Q8_0, DataType.Q4_0),
+                org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry.provider("llama")
+                        .orElseThrow()
+                        .nativeLibraryWeights(BackendId.METAL));
+        assertEquals(
+                java.util.Set.of(),
+                org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry.provider("llama")
+                        .orElseThrow()
+                        .nativeLibraryWeights(BackendId.OPENCL));
+    }
+
     @Test
     public void theRefusalNamesTheWayOut() {
         String message =

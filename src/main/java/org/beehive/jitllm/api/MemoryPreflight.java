@@ -195,6 +195,12 @@ final class MemoryPreflight {
      * happens to exceed the budget would block a load that would in fact have run, and the caller
      * has no way to overrule it. An under-confident plan is reported by {@link
      * LocalModels#preflight}, where a person can read it, rather than enforced here.
+     *
+     * <p>Except where even its lower bound does not fit: a plan whose buffers, each counted once,
+     * already exceed the budget is refused at any known confidence ({@link
+     * MemoryPlan#exceedsConfiguredBudgetAtLowerBound}). That is what refuses a Metal load — capped
+     * at {@code CONSERVATIVE} — that could only die part-allocated, such as a 7B Q8_0 model whose
+     * MLX prefill adds a second form of its projections beside them.
      */
     static void refuseIfOverCapacity(Path modelFile, int contextLength, ModelOptions options) {
         MemoryPlan plan;
@@ -205,7 +211,9 @@ final class MemoryPreflight {
             // load's own error is the better diagnostic in that case.
             return;
         }
-        if (plan.confidence() != MemoryPlan.Confidence.EXACT || plan.fitsConfiguredBudget()) {
+        boolean exactOver =
+                plan.confidence() == MemoryPlan.Confidence.EXACT && !plan.fitsConfiguredBudget();
+        if (!exactOver && !plan.exceedsConfiguredBudgetAtLowerBound()) {
             return;
         }
         throw new InsufficientDeviceMemoryException(plan);

@@ -62,7 +62,7 @@
                  they extend jdk.incubator.vector, and empty in the profiles that put TornadoVM on
                  the class path instead. -->
         <tornadovm.module.path>${tornadovm.sdk.modules}</tornadovm.module.path>
-        <tornadovm.add.modules>,tornado.api,tornado.runtime,tornado.cublas,tornado.cudnn</tornadovm.add.modules>
+        <tornadovm.add.modules>,tornado.api,tornado.runtime,tornado.cublas,tornado.cudnn,tornado.mlx</tornadovm.add.modules>
         <!-- The test JVM resolves those modules eagerly, so it also needs what tornado.runtime
                  requires at run time: the Graal the SDK vendors as tornado.graal. -->
         <tornadovm.test.module.path>${tornadovm.module.path}${path.separator}${env.TORNADOVM_HOME}/share/java/graalJars</tornadovm.test.module.path>
@@ -304,7 +304,7 @@
         <profile>
             <id>nccl</id>
             <properties>
-                <tornadovm.add.modules>,tornado.api,tornado.runtime,tornado.cublas,tornado.cudnn,tornado.nccl</tornadovm.add.modules>
+                <tornadovm.add.modules>,tornado.api,tornado.runtime,tornado.cublas,tornado.cudnn,tornado.mlx,tornado.nccl</tornadovm.add.modules>
             </properties>
             <build>
                 <plugins>
@@ -513,6 +513,12 @@
                     <version>${tornadovm.version}</version>
                     <scope>provided</scope>
                 </dependency>
+                <dependency>
+                    <groupId>io.github.beehive-lab</groupId>
+                    <artifactId>tornado-mlx</artifactId>
+                    <version>${tornadovm.version}</version>
+                    <scope>provided</scope>
+                </dependency>
             </dependencies>
             <build>
                 <plugins>
@@ -676,6 +682,13 @@
                     <version>${tornadovm.sdk.version}</version>
                     <scope>system</scope>
                     <systemPath>${tornadovm.sdk.modules}/tornado-cudnn-${tornadovm.sdk.version}.jar</systemPath>
+                </dependency>
+                <dependency>
+                    <groupId>io.github.beehive-lab</groupId>
+                    <artifactId>tornado-mlx</artifactId>
+                    <version>${tornadovm.sdk.version}</version>
+                    <scope>system</scope>
+                    <systemPath>${tornadovm.sdk.modules}/tornado-mlx-${tornadovm.sdk.version}.jar</systemPath>
                 </dependency>
             </dependencies>
         </profile>

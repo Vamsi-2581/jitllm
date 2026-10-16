@@ -199,12 +199,7 @@ public class Qwen2Q8_0FFNLayers
             weights.w2Layered[layerIndex].asByteArray(),
             weights.w3Layered[layerIndex].asByteArray()
         };
-        String weightSrc = weightSourceGraphName(layerIndex);
-        if (weightSrc != null) {
-            unifiedLayer.consumeFromDevice(weightSrc, layerWeights);
-        } else {
-            unifiedLayer.transferToDevice(DataTransferMode.FIRST_EXECUTION, layerWeights);
-        }
+        bindLayerWeights(unifiedLayer, weightSourceGraphName(layerIndex), layerIndex, layerWeights);
         if (firstInGraph) {
             unifiedLayer = configureLayerDataTransfers(unifiedLayer, layerIndex);
             bindDecodeScratch(unifiedLayer, layerIndex);

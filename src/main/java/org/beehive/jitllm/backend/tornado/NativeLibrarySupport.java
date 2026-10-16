@@ -13,10 +13,14 @@ import org.beehive.jitllm.runtime.policy.ExecutionPolicy;
  * Where vendor native libraries ({@code --with-native-libraries}) have an implementation.
  *
  * <p>Experimental and off by default: the JIT kernels run every supported configuration, and they
- * are what is measured across models and sizes. The native path replaces batched-prefill
+ * are what is measured across models and sizes. On CUDA the native path replaces batched-prefill
  * projections with cuBLAS GEMMs over stacked weight copies (and the first chunk's attention with
  * cuDNN where it is usable), which costs a second copy of those projections on the device — for
- * Qwen3-8B F16, 8.6 GB beside 13.2 GB of weights.
+ * Qwen3-8B F16, 8.6 GB beside 13.2 GB of weights. On Metal it runs the batched prefill's attention
+ * and projections on Apple MLX ({@link MlxPrefill}).
+ *
+ * <p>Which families and weights have a path on which backend is each provider's answer ({@code
+ * TornadoPlanProvider.nativeLibraryWeights}); nothing here lists them.
  *
  * <p>Asking for it anywhere it is not implemented is refused, never ignored: a request that quietly
  * runs the JIT kernels would read, in a benchmark, as a measurement of the libraries.
@@ -30,12 +34,15 @@ public final class NativeLibrarySupport {
         if (BackendId.CPU.equals(c.backend())) {
             return Optional.of("the CPU path has no native-library implementation");
         }
-        if (!BackendId.CUDA.equals(c.backend())) {
-            return Optional.of("native libraries are implemented on CUDA only");
+        if (!BackendId.CUDA.equals(c.backend()) && !BackendId.METAL.equals(c.backend())) {
+            return Optional.of("native libraries are implemented on CUDA and Metal only");
         }
         boolean implemented =
                 TornadoPlanRegistry.provider(c.architecture())
-                        .map(provider -> provider.nativeLibraryWeights().contains(c.weights()))
+                        .map(
+                                provider ->
+                                        provider.nativeLibraryWeights(c.backend())
+                                                .contains(c.weights()))
                         .orElse(false);
         if (!implemented) {
             return Optional.of(
@@ -43,14 +50,19 @@ public final class NativeLibrarySupport {
                             + c.architecture()
                             + " / "
                             + c.weights()
+                            + " on "
+                            + c.backend()
                             + " yet ("
-                            + TornadoPlanRegistry.nativeLibraryPaths()
+                            + TornadoPlanRegistry.nativeLibraryPaths(c.backend())
                             + " only)");
         }
         if (c.mode() != ExecutionMode.BATCH_PREFILL_DECODE) {
             return Optional.of(
                     "native libraries replace batched-prefill kernels only; add"
                             + " --with-prefill-decode --batch-prefill-size N");
+        }
+        if (BackendId.METAL.equals(c.backend())) {
+            return Optional.empty();
         }
         if (!c.tensorCores()) {
             return Optional.of("the native path needs a tensor-core device");
@@ -69,8 +81,14 @@ public final class NativeLibrarySupport {
         }
         Combination combination = Fp16KeyValueSupport.resolve(model, policy, gpu);
         Optional<String> reason = unsupported(combination);
-        if (reason.isEmpty() && !NativePrefillSupport.cublasAvailable()) {
-            reason = Optional.of("cuBLAS could not be loaded in this process");
+        if (reason.isEmpty()) {
+            if (BackendId.METAL.equals(combination.backend())) {
+                if (!MlxPrefill.available()) {
+                    reason = Optional.of("MLX's mlx.metallib could not be loaded in this process");
+                }
+            } else if (!NativePrefillSupport.cublasAvailable()) {
+                reason = Optional.of("cuBLAS could not be loaded in this process");
+            }
         }
         reason.ifPresent(
                 r -> {

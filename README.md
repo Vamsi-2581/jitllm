@@ -308,6 +308,46 @@ cuDNN 9 (for example the `nvidia-cudnn-cu12` wheel) and add its `lib` directory 
 54k tok/s for Qwen3-0.6B F16). Without the flag the same prefill runs on jitllm's own
 tensor-core kernels, about 0.5–0.75× as fast.
 
+### Fast prompt processing on Apple silicon (MLX)
+
+On Metal, `--with-native-libraries` runs the batched prefill's attention and projections on
+[Apple MLX](https://github.com/ml-explore/mlx) through TornadoVM's `tornado-mlx` library tasks;
+decode stays on jitllm's kernels. It needs MLX 0.32.3's kernel library (`brew install mlx`) and an
+M4-class GPU, and should run with `-Dtornado.mlx.async=true`, without which every MLX call waits
+for the GPU and prefill is slower than jitllm's own kernels:
+
+```bash
+JAVA_TOOL_OPTIONS=-Dtornado.mlx.async=true ./jitllm run --gpu --with-prefill-decode \
+  --batch-prefill-size 2048 --with-native-libraries -m Qwen3-0.6B-Q8_0.gguf --prompt "..."
+```
+
+Llama (F16, Q8_0, Q4_0), Mistral, Qwen2 / DeepSeek-R1-Distill-Qwen, Qwen3, Phi-3 and Granite (F16,
+Q8_0) are supported. Q8_0 and Q4_0 projections are multiplied either from resident FP16 copies —
+faster, at twice the Q8_0 size beside the model — or from an exact affine repack MLX decodes per
+chunk; the copies are kept when they fit 6 GB and the `--gpu-memory` budget, and
+`-Djitllm.prefill.decodedProjections=resident|per-chunk` pins the choice.
+
+Prompt processing on an Apple M4 Pro (24 GB), pp2048 at a batch of 2048, FP16 key/value cache,
+TornadoVM develop `3d2d9695`, `llama-bench` at `11fe021` with flash attention (tok/s, mean of 5):
+
+| Model | jitllm kernels | MLX | MLX weights | llama.cpp |
+| --- | ---: | ---: | --- | ---: |
+| Qwen3-0.6B F16 | 3,257 | 4,042 | F16 | 4,233 |
+| Qwen3-0.6B F16 (pp4096, batch 4096) | 2,418 | 3,467 | F16 | 3,360 |
+| Qwen3-0.6B Q8_0 | 3,088 | 4,067 | FP16 copies | 4,076 |
+| Qwen3-0.6B Q8_0 | | 3,834 | affine | |
+| Llama-3.2-1B F16 | 2,246 | 2,613 | F16 | 2,655 |
+| Llama-3.2-1B Q8_0 | 2,045 | 2,609 | FP16 copies | 2,532 |
+| Llama-3.2-1B Q8_0 | | 2,398 | affine | |
+| Qwen2.5-0.5B Q8_0 | 4,989 | 6,163 | FP16 copies | 5,924 |
+| Phi-3-mini Q8_0 | 538 | 643 | affine | 680 |
+| Phi-3-mini Q8_0 | | 705 | FP16 copies, pinned (+7.2 GB) | |
+
+Mistral-7B Q8_0 measures 293 (jitllm) against 310 ± 69 (MLX, affine) and 372 (llama.cpp) with
+`--gpu-memory 17GB`; the spread reflects memory pressure on a 24 GB machine. Under the default
+14 GB budget `jitllm run` refuses the MLX load at the memory preflight (`GPUL-MEM-001`, before any
+device allocation); `jitllm bench` skips the preflight and fails part-allocated instead.
+
 -----------
 
 ### Several GPUs

@@ -134,9 +134,11 @@ public interface TornadoPlanProvider {
 
     /**
      * The weight representations whose batched prefill has a native-library path ({@code
-     * --with-native-libraries}): projections through cuBLAS rather than the JIT kernels.
+     * --with-native-libraries}) on a {@code backend} device: on CUDA, projections through cuBLAS
+     * rather than the JIT kernels; on Metal, attention and projections through Apple MLX ({@code
+     * MlxPrefill}). Empty where the family has none, which admission refuses by name.
      */
-    default Set<DataType> nativeLibraryWeights() {
+    default Set<DataType> nativeLibraryWeights(BackendId backend) {
         return Set.of();
     }
 
