@@ -52,8 +52,9 @@ public final class OpenAIServer implements AutoCloseable {
     /**
      * Either path, behind one call. The engine-backed service batches several conversations; the
      * original serializes them behind a lock. The HTTP handlers do not need to know which.
+     * Package-private so the wire format can be tested without a model.
      */
-    private interface Generator extends AutoCloseable {
+    interface Generator extends AutoCloseable {
         InferenceService.Result generate(
                 InferenceService.Request request, java.util.function.Consumer<String> onToken);
 
@@ -142,7 +143,7 @@ public final class OpenAIServer implements AutoCloseable {
         };
     }
 
-    private OpenAIServer(Generator service, String servedModel, boolean gpu, int contextLength) {
+    OpenAIServer(Generator service, String servedModel, boolean gpu, int contextLength) {
         this.service = service;
         this.servedModel = servedModel;
         this.gpu = gpu;
@@ -743,7 +744,7 @@ public final class OpenAIServer implements AutoCloseable {
         try {
             if (chat) {
                 // First chunk carries the assistant role.
-                writeSse(os, chunk(id, object, created, roleDelta(), null));
+                writeSse(os, chunk(id, object, created, roleDelta(), null, includeUsage));
             }
             InferenceService.Result r =
                     service.generate(
@@ -757,14 +758,23 @@ public final class OpenAIServer implements AutoCloseable {
                                                     object,
                                                     created,
                                                     chat ? contentDelta(piece) : textField(piece),
-                                                    null));
+                                                    null,
+                                                    includeUsage));
                                 } catch (IOException io) {
                                     throw new RuntimeException(
                                             io); // client disconnected — abort generation
                                 }
                             });
             String finish = r.stopped() ? "stop" : "length";
-            writeSse(os, chunk(id, object, created, chat ? Map.of() : textField(""), finish));
+            writeSse(
+                    os,
+                    chunk(
+                            id,
+                            object,
+                            created,
+                            chat ? Map.of() : textField(""),
+                            finish,
+                            includeUsage));
             if (includeUsage) {
                 writeSse(
                         os,
@@ -833,9 +843,18 @@ public final class OpenAIServer implements AutoCloseable {
         return Map.of("text", piece);
     }
 
-    /** One SSE data object. {@code delta} is the chat delta map or the completion text map. */
+    /**
+     * One SSE data object. {@code delta} is the chat delta map or the completion text map. When the
+     * client asked for usage, every ordinary chunk carries {@code "usage": null}, as OpenAI's do;
+     * only the final usage chunk has the counts.
+     */
     private String chunk(
-            String id, String object, long created, Map<String, Object> delta, String finish) {
+            String id,
+            String object,
+            long created,
+            Map<String, Object> delta,
+            String finish,
+            boolean includeUsage) {
         Map<String, Object> choice = new LinkedHashMap<>();
         choice.put("index", 0);
         if (object.startsWith("chat")) {
@@ -850,6 +869,9 @@ public final class OpenAIServer implements AutoCloseable {
         obj.put("created", created);
         obj.put("model", servedModel);
         obj.put("choices", List.of(choice));
+        if (includeUsage) {
+            obj.put("usage", null);
+        }
         return Json.write(obj);
     }
 
