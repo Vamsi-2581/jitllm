@@ -20,6 +20,7 @@ import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.HalfFloat;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 import uk.ac.manchester.tornado.mlx.Mlx;
@@ -54,6 +55,9 @@ public final class MlxPrefillProjections {
 
     private static final int GROUP = MlxPrefill.GROUP;
 
+    /** Threads per row of {@link MlxPrefillKernels#swigluRowScale}. */
+    private static final int ROW_THREADS = 256;
+
     /** One projection's weights in MLX's form: FP16, or affine-quantized. */
     record Matrix(
             HalfFloatArray fp16,
@@ -87,6 +91,7 @@ public final class MlxPrefillProjections {
     private final HalfFloatArray outHalf; // B × dim
     private final HalfFloatArray gateUpHalf; // B × 2·hidden
     private final HalfFloatArray hbHalf; // B × hidden
+    private final FloatArray downRowScale; // B
 
     /**
      * One layer's projection weights: Q, K and V (one fused tensor, or three stacked in that
@@ -331,6 +336,7 @@ public final class MlxPrefillProjections {
         this.outHalf = new HalfFloatArray(batchSize * dim);
         this.gateUpHalf = new HalfFloatArray(batchSize * 2 * hidden);
         this.hbHalf = new HalfFloatArray(batchSize * hidden);
+        this.downRowScale = new FloatArray(batchSize);
     }
 
     /** The tensors, rows stacked in order, as one matrix in {@code form}. */
@@ -444,7 +450,7 @@ public final class MlxPrefillProjections {
      * Declares the shared FP16 buffers and this layer's weights in layer graph {@code layerIndex}.
      */
     public void declare(TaskGraph layer, int layerIndex, String predecessor) {
-        Object[] buffers = {xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf};
+        Object[] buffers = {xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf, downRowScale};
         if (layerIndex == 0) {
             layer.transferToDevice(DataTransferMode.FIRST_EXECUTION, buffers);
         } else {
@@ -511,7 +517,9 @@ public final class MlxPrefillProjections {
 
     /**
      * The feed-forward block after the family's {@code batch_ffn_rms}: RMS apply into FP16, the
-     * stacked gate/up GEMM, SwiGLU, and the down GEMM added into {@code wrapXBatch}.
+     * stacked gate/up GEMM, SwiGLU, and the down GEMM added into {@code wrapXBatch}. A row whose
+     * SwiGLU output would overflow FP16 in the down GEMM is scaled into range first, and the scale
+     * is undone in the FP32 residual add.
      */
     public void ffn(TaskGraph layer, int layerIndex) {
         layer.task(
@@ -525,21 +533,33 @@ public final class MlxPrefillProjections {
                 dim);
         gemm(layer, "batch_ffn_gate_up", xHalf, gateUp[layerIndex], gateUpHalf, dim, 2 * hidden);
         layer.task(
+                "batch_ffn_row_scale",
+                MlxPrefillKernels::swigluRowScale,
+                context,
+                gateUpHalf,
+                downRowScale,
+                hidden,
+                batchSize,
+                ROW_THREADS);
+        layer.task(
                 "batch_ffn_swiglu",
-                MlxPrefillKernels::swiglu,
+                MlxPrefillKernels::swigluScaled,
                 context,
                 gateUpHalf,
                 hbHalf,
+                downRowScale,
                 hidden,
                 batchSize * hidden);
         gemm(layer, "batch_ffn_down", hbHalf, w2[layerIndex], outHalf, hidden, dim);
         layer.task(
                 "batch_ffn_residual",
-                MlxPrefillKernels::addResidual,
+                MlxPrefillKernels::addRowScaledResidual,
                 context,
                 state.workspace.wrapXBatch,
                 outHalf,
+                downRowScale,
                 residualScale,
+                dim,
                 batchSize * dim);
     }
 
@@ -572,7 +592,7 @@ public final class MlxPrefillProjections {
 
     /** Keeps the shared buffers on the device for the next layer graph. */
     public void persist(TaskGraph layer) {
-        layer.persistOnDevice(xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf);
+        layer.persistOnDevice(xHalf, qkvHalf, attnHalf, outHalf, gateUpHalf, hbHalf, downRowScale);
     }
 
     /** The grids of this helper's kernels, under graph-qualified prefix {@code p}. */
@@ -582,6 +602,9 @@ public final class MlxPrefillProjections {
         scheduler.addWorkerGrid(p + "batch_attn_half", elementwise(batchSize * qDim));
         scheduler.addWorkerGrid(p + "batch_attn_residual", elementwise(batchSize * dim));
         scheduler.addWorkerGrid(p + "batch_ffn_rms_apply", elementwise(batchSize * dim));
+        scheduler.addWorkerGrid(
+                p + "batch_ffn_row_scale",
+                WorkerGridFactory.genericWorker(batchSize * ROW_THREADS, ROW_THREADS));
         scheduler.addWorkerGrid(p + "batch_ffn_swiglu", elementwise(batchSize * hidden));
         scheduler.addWorkerGrid(p + "batch_ffn_residual", elementwise(batchSize * dim));
     }
