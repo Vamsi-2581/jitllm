@@ -156,6 +156,13 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
     /** The layer prefixes that convert SwiGLU's FP32 output to FP16 in a task of their own. */
     private final java.util.Set<String> hbConvertLayers = new java.util.HashSet<>();
 
+    /**
+     * The residual passes built after a projection that stores rather than adds, by qualified task
+     * name. Not every tensor-core projection fuses its residual: a packed int8 GEMM below the FP16
+     * pair's output width stores, so the grid follows the tasks built, not the path taken.
+     */
+    private final java.util.Set<String> residualPasses = new java.util.LinkedHashSet<>();
+
     /** The int8 pair's activation quantizations, with their lane counts. */
     private final java.util.Map<String, Integer> quantizeTasks = new java.util.LinkedHashMap<>();
 
@@ -294,6 +301,26 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
      */
     private boolean packedQ4Eligible(String task, int n, int k) {
         return int8TaskFilterForTests.test(task) && int8Quantizes(k) && n % GEMM_TILE == 0;
+    }
+
+    /**
+     * Whether the Q4_0 projection {@code w} of {@code n} outputs over {@code k} inputs runs as an
+     * int8 GEMM, so its input must be quantized rather than converted to FP16. A packed weight
+     * takes it below the FP16 pair's output threshold too, since it has no other kernel.
+     */
+    private boolean q40Int8(String task, TornadoTensor w, int n, int k) {
+        return int8Eligible(task, n, k) || (w.isPackedQ4() && packedQ4Eligible(task, n, k));
+    }
+
+    /** {@code x += out}: the residual of a projection whose kernel stored rather than added. */
+    private void residualPass(TaskGraph layer, int layerIndex, String task) {
+        residualPasses.add("batchLayer_" + layerIndex + "." + task);
+        layer.task(
+                task,
+                Qwen35MMAKernels::residualAdd,
+                context,
+                state.workspace.wrapXBatch,
+                state.workspace.wrapFFNDownBatch);
     }
 
     /** Whether the int8 pair quantizes activations of {@code k} columns at all. */
@@ -1265,9 +1292,7 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                     state.workspace.wrapGateBatch,
                     config.hiddenDim(),
                     config.dim());
-            if (int8Eligible("ffn_up_proj", config.hiddenDim(), config.dim())
-                    || (up.isPackedQ4()
-                            && packedQ4Eligible("ffn_up_proj", config.hiddenDim(), config.dim()))) {
+            if (q40Int8("ffn_up_proj", up, config.hiddenDim(), config.dim())) {
                 // The int8 pair: the up GEMM writes silu(gate) * up in FP32 from its
                 // accumulators; the down projection quantizes that next, or converts it to FP16
                 // where it stays on the FP16 pair (the Q4_1 layers).
@@ -1449,11 +1474,12 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                         && mmaEligible(config.hiddenDim(), config.dim());
         // With the gate/up projections on the tensor cores and the down projection reading FP16,
         // SwiGLU writes the FP16 buffer itself and the conversion task below is not built.
-        boolean gateUpInt8 = int8Eligible("ffn_up_proj", config.hiddenDim(), config.dim());
+        TornadoTensor up = require(weights.w3Layered, layerIndex, "ffn_up");
+        boolean gateUpInt8 = q40Int8("ffn_up_proj", up, config.hiddenDim(), config.dim());
         boolean downInt8 =
                 downOnTensorCores
                         && down.dataType() == DataType.Q4_0
-                        && int8Eligible("ffn_down_proj", config.dim(), config.hiddenDim());
+                        && q40Int8("ffn_down_proj", down, config.dim(), config.hiddenDim());
         // The int8 down projection quantizes SwiGLU's FP32 output, so SwiGLU must write FP32
         // whenever the down projection is int8, whatever the gate/up pair did.
         boolean swigluWritesFP16 =
@@ -1465,7 +1491,7 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                 layer,
                 layerIndex,
                 require(weights.w1Layered, layerIndex, "ffn_gate"),
-                require(weights.w3Layered, layerIndex, "ffn_up"),
+                up,
                 state.workspace.wrapNormedBatch,
                 swigluWritesFP16);
         if (downOnTensorCores) {
@@ -1549,12 +1575,7 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
             }
             if (!downResidualFused) {
                 // The direct kernel's store overwrites, so the residual is a pass of its own.
-                layer.task(
-                        "ffn_down_residual",
-                        Qwen35MMAKernels::residualAdd,
-                        context,
-                        state.workspace.wrapXBatch,
-                        state.workspace.wrapFFNDownBatch);
+                residualPass(layer, layerIndex, "ffn_down_residual");
             }
         } else {
             matVecBatch(
@@ -1907,7 +1928,7 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
             // only by the residual pass that immediately follows each write. wrapXBatch, the
             // residual destination, is read and written by the add below and by nothing in
             // between.
-            if (int8Eligible("attn_output_proj", config.dim(), attnDim)) {
+            if (q40Int8("attn_output_proj", attnOutput, config.dim(), attnDim)) {
                 quantizeActivation(
                         layer, layerIndex, "attn_output_q8", state.workspace.wrapXbBatch, attnDim);
             } else if (fakeQuantizeForTests) {
@@ -1939,12 +1960,7 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                     attnDim,
                     fused ? Epilogue.RESIDUAL : Epilogue.STORE);
             if (!fused) {
-                layer.task(
-                        "attn_output_residual",
-                        Qwen35MMAKernels::residualAdd,
-                        context,
-                        state.workspace.wrapXBatch,
-                        state.workspace.wrapFFNDownBatch);
+                residualPass(layer, layerIndex, "attn_output_residual");
             }
             return;
         }
@@ -2241,12 +2257,7 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                         valueDim);
             }
             if (!ssmOutResidualFused) {
-                layer.task(
-                        "ssm_out_residual",
-                        Qwen35MMAKernels::residualAdd,
-                        context,
-                        state.workspace.wrapXBatch,
-                        state.workspace.wrapFFNDownBatch);
+                residualPass(layer, layerIndex, "ssm_out_residual");
             }
         } else {
             matVecBatch(
@@ -2670,9 +2681,6 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                 if (hbConvertLayers.contains(prefix)) {
                     scheduler.addWorkerGrid(prefix + "ffn_down_fp16", hbFP16Convert);
                 }
-                if (!gemmTasks.containsKey(prefix + "ffn_down_proj")) {
-                    scheduler.addWorkerGrid(prefix + "ffn_down_residual", residualAdd);
-                }
             }
 
             if (config.isRecurrentLayer(layer)) {
@@ -2721,9 +2729,6 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                     if (!quantizeTasks.containsKey(prefix + "ssm_out_q8")) {
                         scheduler.addWorkerGrid(prefix + "ssm_out_fp16", ssmOutFP16Convert);
                     }
-                    if (!gemmTasks.containsKey(prefix + "ssm_out_proj")) {
-                        scheduler.addWorkerGrid(prefix + "ssm_out_residual", residualAdd);
-                    }
                 }
             } else {
                 scheduler.addWorkerGrid(
@@ -2747,9 +2752,6 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
                 if (onTensorCores(prefix + "attn_output_proj")) {
                     if (!quantizeTasks.containsKey(prefix + "attn_output_q8")) {
                         scheduler.addWorkerGrid(prefix + "attn_output_fp16", attnOutputFP16Convert);
-                    }
-                    if (!gemmTasks.containsKey(prefix + "attn_output_proj")) {
-                        scheduler.addWorkerGrid(prefix + "attn_output_residual", residualAdd);
                     }
                 }
             }
@@ -2778,6 +2780,9 @@ public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTas
             scheduler.addWorkerGrid(
                     entry.getKey(),
                     WorkerGridFactory.genericWorker(entry.getValue(), ELEMENTWISE_LOCAL));
+        }
+        for (String task : residualPasses) {
+            scheduler.addWorkerGrid(task, residualAdd);
         }
     }
 
