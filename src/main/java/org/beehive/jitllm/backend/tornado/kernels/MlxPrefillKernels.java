@@ -83,6 +83,138 @@ public final class MlxPrefillKernels {
     }
 
     /**
+     * The largest magnitude {@link #toHalfScaled} and {@link #swigluScaled} let a row of a
+     * projection's input reach: low enough that the GEMM's FP16 products stay finite, high enough
+     * that ordinary rows are not scaled at all.
+     */
+    public static final float PROJECTION_INPUT_LIMIT = 256.0f;
+
+    /**
+     * {@code rowScale[b] = min(1, PROJECTION_INPUT_LIMIT / max_i |in[b][i]|)}: the factor that
+     * keeps row {@code b} of a projection, input and product, inside FP16. One workgroup of {@code
+     * localSize} threads per row of {@code width}, over {@code rows} rows.
+     */
+    public static void rowScale(
+            KernelContext context,
+            FloatArray in,
+            FloatArray rowScale,
+            int width,
+            int rows,
+            int localSize) {
+        int tid = context.localIdx;
+        int b = context.groupIdx;
+        float[] partial = context.allocateFloatLocalArray(localSize);
+        float max = 0.0f;
+        if (b < rows) {
+            for (int i = tid; i < width; i += localSize) {
+                max = TornadoMath.max(max, TornadoMath.abs(in.get(b * width + i)));
+            }
+        }
+        partial[tid] = max;
+        context.localBarrier();
+        for (int s = localSize / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                partial[tid] = TornadoMath.max(partial[tid], partial[tid + s]);
+            }
+            context.localBarrier();
+        }
+        if (tid == 0 && b < rows) {
+            float peak = partial[0];
+            rowScale.set(b, peak > PROJECTION_INPUT_LIMIT ? PROJECTION_INPUT_LIMIT / peak : 1.0f);
+        }
+    }
+
+    /** {@code out[b][i] = FP16(in[b][i] * rowScale[b])}: {@link #toHalf} with {@link #rowScale}. */
+    public static void toHalfScaled(
+            KernelContext context,
+            FloatArray in,
+            HalfFloatArray out,
+            FloatArray rowScale,
+            int width,
+            int total) {
+        int id = context.globalIdx;
+        if (id < total) {
+            out.set(id, new HalfFloat(in.get(id) * rowScale.get(id / width)));
+        }
+    }
+
+    /**
+     * {@code rowScale[b] = min(1, PROJECTION_INPUT_LIMIT / max_i |SiLU(gate[b][i]) * up[b][i]|)}:
+     * the factor that keeps row {@code b} of the down projection, input and product, inside FP16.
+     * Some tokens (the first, in Granite 4.0) carry activations past FP16's 65504 there. One
+     * workgroup of {@code localSize} threads per row, over {@code rows} rows.
+     */
+    public static void swigluRowScale(
+            KernelContext context,
+            HalfFloatArray gateUp,
+            FloatArray rowScale,
+            int hidden,
+            int rows,
+            int localSize) {
+        int tid = context.localIdx;
+        int b = context.groupIdx;
+        float[] partial = context.allocateFloatLocalArray(localSize);
+        float max = 0.0f;
+        if (b < rows) {
+            for (int i = tid; i < hidden; i += localSize) {
+                float gate = gateUp.get(b * 2 * hidden + i).getFloat32();
+                float up = gateUp.get(b * 2 * hidden + hidden + i).getFloat32();
+                float silu = gate / (1.0f + TornadoMath.exp(-gate));
+                max = TornadoMath.max(max, TornadoMath.abs(silu * up));
+            }
+        }
+        partial[tid] = max;
+        context.localBarrier();
+        for (int s = localSize / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                partial[tid] = TornadoMath.max(partial[tid], partial[tid + s]);
+            }
+            context.localBarrier();
+        }
+        if (tid == 0 && b < rows) {
+            float peak = partial[0];
+            rowScale.set(b, peak > PROJECTION_INPUT_LIMIT ? PROJECTION_INPUT_LIMIT / peak : 1.0f);
+        }
+    }
+
+    /** {@link #swiglu} with row {@code b} multiplied by {@code rowScale[b]} before FP16. */
+    public static void swigluScaled(
+            KernelContext context,
+            HalfFloatArray gateUp,
+            HalfFloatArray hb,
+            FloatArray rowScale,
+            int hidden,
+            int total) {
+        int id = context.globalIdx;
+        if (id < total) {
+            int b = id / hidden;
+            int i = id % hidden;
+            float gate = gateUp.get(b * 2 * hidden + i).getFloat32();
+            float up = gateUp.get(b * 2 * hidden + hidden + i).getFloat32();
+            float silu = gate / (1.0f + TornadoMath.exp(-gate));
+            hb.set(id, new HalfFloat(silu * up * rowScale.get(b)));
+        }
+    }
+
+    /**
+     * {@code x[b][i] += scale * y[b][i] / rowScale[b]}: {@link #addResidual} undoing the row factor
+     * of {@link #toHalfScaled} or {@link #swigluScaled} in FP32.
+     */
+    public static void addRowScaledResidual(
+            KernelContext context,
+            FloatArray x,
+            HalfFloatArray y,
+            FloatArray rowScale,
+            float scale,
+            int width,
+            int total) {
+        int id = context.globalIdx;
+        if (id < total) {
+            x.set(id, x.get(id) + scale * y.get(id).getFloat32() / rowScale.get(id / width));
+        }
+    }
+
+    /**
      * {@code dst[h][t][d] = FP16(src[t][h * headDim + d])}: token-major activations to the
      * head-major layout of MLX's attention, over {@code total = tokens * heads * headDim}.
      */

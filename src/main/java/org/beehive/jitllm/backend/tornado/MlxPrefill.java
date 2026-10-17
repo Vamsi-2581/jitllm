@@ -135,7 +135,8 @@ public record MlxPrefill(DataType weights, Projections projections) {
      *       that keeps them split (a fused tensor is multiplied as it is, and bound, not copied);
      *       for Q8_0 and Q4_0, the resident FP16 copies or the affine repack, whichever the
      *       residency resolves to;
-     *   <li>the FP16 staging every layer graph shares: the GEMM operands and products;
+     *   <li>the FP16 staging every layer graph shares: the GEMM operands and products, and the FP32
+     *       per-row scales that keep the output and down projections inside FP16;
      *   <li>the attention's contiguous FP16 query, output, and key and value buffers sized for the
      *       whole context plus one chunk.
      * </ul>
@@ -156,7 +157,9 @@ public record MlxPrefill(DataType weights, Projections projections) {
         long kvDim = config.kvDim();
         long hidden = config.hiddenDim();
         long rows = batchSize;
-        long staging = Short.BYTES * rows * (dim + (qDim + 2 * kvDim) + qDim + dim + 3 * hidden);
+        long staging =
+                Short.BYTES * rows * (dim + (qDim + 2 * kvDim) + qDim + dim + 3 * hidden)
+                        + Float.BYTES * 2 * rows;
         long attention =
                 Short.BYTES
                         * (2 * rows * qDim + 2 * ((long) config.contextLength() + rows) * kvDim);
