@@ -542,8 +542,8 @@ public final class PlanDispatchEvidence {
      * the evidence: a native projection is present as the <b>absence</b> of a {@code qkvProj} grid,
      * and cuDNN attention as the presence of its three adapter grids where the generated attention
      * would otherwise be: {@code batch_attention}, or {@code attn_gather} and the GEMM grids that
-     * follow it when that attention runs on the tensor cores. A system property cannot say this — it says what was asked for, and the
-     * capability probe may have answered no.
+     * follow it when that attention runs on the tensor cores. A system property cannot say this —
+     * it says what was asked for, and the capability probe may have answered no.
      */
     // @formatter:on
     public record NativePrefillEvidence(

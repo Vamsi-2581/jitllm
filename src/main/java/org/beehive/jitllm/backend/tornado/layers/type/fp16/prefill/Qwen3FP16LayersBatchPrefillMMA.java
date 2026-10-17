@@ -523,8 +523,7 @@ public class Qwen3FP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         logInitialization(
                 "[jitllm] prefill fallback family: %d graphs, %s, all other buffers bound from the"
                         + " primary family%n",
-                groups,
-                tcAttention != null ? "tensor-core attention" : "JIT paged attention");
+                groups, tcAttention != null ? "tensor-core attention" : "JIT paged attention");
     }
 
     /**
