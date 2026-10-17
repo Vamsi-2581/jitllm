@@ -131,8 +131,8 @@ public class Qwen35Int8TopologyAccelTest {
     }
 
     /**
-     * Q4_0 everywhere but block 0's down projection, which is Q4_1 as on the 27B's first eight;
-     * the Q4_0 projections whose shape packs are packed when {@code packed} is set.
+     * Q4_0 everywhere but block 0's down projection, which is Q4_1 as on the 27B's first eight; the
+     * Q4_0 projections whose shape packs are packed when {@code packed} is set.
      */
     private static Qwen35TornadoWeights weights(Qwen35Configuration config, boolean packed) {
         final int DIM = config.dim();
@@ -166,8 +166,7 @@ public class Qwen35Int8TopologyAccelTest {
             ffnNorm[l] = f32(DIM);
             ffnGate[l] = q40(HIDDEN, DIM, packed);
             ffnUp[l] = q40(HIDDEN, DIM, packed);
-            ffnDown[l] =
-                    l == 0 ? blocked(DataType.Q4_1, HIDDEN * DIM) : q40(DIM, HIDDEN, packed);
+            ffnDown[l] = l == 0 ? blocked(DataType.Q4_1, HIDDEN * DIM) : q40(DIM, HIDDEN, packed);
             if (l < TRUNK_LAYERS && config.isRecurrentLayer(l)) {
                 ssmQkv[l] = q40(config.deltaNetConvDim(), DIM, packed);
                 ssmGate[l] = q40(config.deltaNetValueDim(), DIM, packed);
@@ -390,11 +389,11 @@ public class Qwen35Int8TopologyAccelTest {
     /**
      * Packed Q4_0 at the 0.8B's widths (dim 1024, FFN 3584), every output width below the FP16
      * pair's threshold: a packed weight has only the int8 GEMM, so each packed projection's input
-     * must be quantized even where an unpacked one of that shape would take the direct FP16
-     * kernel, and it stores rather than adds, so its residual pass needs a grid of its own. The
-     * attention output and the down projection once read whatever the scratch held from the
-     * previous quantization, their residual passes ran without a grid, and the model generated
-     * garbage at prefill width 128.
+     * must be quantized even where an unpacked one of that shape would take the direct FP16 kernel,
+     * and it stores rather than adds, so its residual pass needs a grid of its own. The attention
+     * output and the down projection once read whatever the scratch held from the previous
+     * quantization, their residual passes ran without a grid, and the model generated garbage at
+     * prefill width 128.
      */
     // @formatter:on
     @Test
