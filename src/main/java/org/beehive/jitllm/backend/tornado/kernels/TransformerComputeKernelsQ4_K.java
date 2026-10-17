@@ -213,13 +213,158 @@ public final class TransformerComputeKernelsQ4_K {
             int d,
             int localWorkGroupSize) {
         int rowId = context.groupIdx;
-        if (rowId >= d) {
-            return;
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < d) {
+            int localId = context.localIdx;
+            float partial =
+                    warpPartialDP4A(
+                            context, xQuants, xScales, xSums, w, n, rowId, localWorkGroupSize);
+            if ((localId & 31) == 0) {
+                warpSums[localId >> 5] = partial;
+            }
+            context.localBarrier();
+            if (localId == 0) {
+                float total = 0.0f;
+                for (int warp = 0; warp < localWorkGroupSize / 32; warp++) {
+                    total += warpSums[warp];
+                }
+                output.set(rowId, total);
+            }
         }
-        int localId = context.localIdx;
-        int warpCount = localWorkGroupSize / 32;
-        float[] warpSums = context.allocateFloatLocalArray(warpCount);
+    }
 
+    /**
+     * {@code hb[row] += w[row]·x}, the packed-integer form of {@link
+     * #matrixVectorGenericWithResidualQ4_K}: the residual projections of a decode layer (attention
+     * output, FFN down) over the activation quantized by {@code quantizeActivationQ8Blocks}. Same
+     * lane mapping and reduction as {@link #matrixVectorGenericQ4_KDP4A}.
+     */
+    public static void matrixVectorGenericWithResidualQ4_KDP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            IntArray xSums,
+            FloatArray hb,
+            ByteArray w,
+            int n,
+            int d,
+            int localWorkGroupSize) {
+        int rowId = context.groupIdx;
+        float[] warpSums = context.allocateFloatLocalArray(localWorkGroupSize / 32);
+        if (rowId < d) {
+            int localId = context.localIdx;
+            float partial =
+                    warpPartialDP4A(
+                            context, xQuants, xScales, xSums, w, n, rowId, localWorkGroupSize);
+            if ((localId & 31) == 0) {
+                warpSums[localId >> 5] = partial;
+            }
+            context.localBarrier();
+            if (localId == 0) {
+                float total = 0.0f;
+                for (int warp = 0; warp < localWorkGroupSize / 32; warp++) {
+                    total += warpSums[warp];
+                }
+                hb.set(rowId, hb.get(rowId) + total);
+            }
+        }
+    }
+
+    /**
+     * {@code hb[row] = silu(w1[row]·x) * (w3[row]·x)}, both Q4_K projections against the same
+     * quantized activation in one launch. SiLU is applied to the gate reduced across every warp,
+     * never per warp. Worker: one workgroup of {@code localWorkGroupSize} lanes (a multiple of 32)
+     * per row; {@code n} a multiple of 256.
+     */
+    public static void fusedFFNGateUpSiLUQ4_KDP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            IntArray xSums,
+            FloatArray hb,
+            ByteArray w1,
+            ByteArray w3,
+            int n,
+            int d,
+            int localWorkGroupSize) {
+        int rowId = context.groupIdx;
+        int warpCount = localWorkGroupSize / 32;
+        // Gate in the first warpCount entries, up in the second.
+        float[] warpSums = context.allocateFloatLocalArray(warpCount * 2);
+        if (rowId < d) {
+            int localId = context.localIdx;
+            float gate =
+                    rowPartialDP4A(
+                            context, xQuants, xScales, xSums, w1, n, rowId, localWorkGroupSize);
+            float up =
+                    rowPartialDP4A(
+                            context, xQuants, xScales, xSums, w3, n, rowId, localWorkGroupSize);
+            gate += context.simdShuffleDown(gate, 16);
+            gate += context.simdShuffleDown(gate, 8);
+            gate += context.simdShuffleDown(gate, 4);
+            gate += context.simdShuffleDown(gate, 2);
+            gate += context.simdShuffleDown(gate, 1);
+            up += context.simdShuffleDown(up, 16);
+            up += context.simdShuffleDown(up, 8);
+            up += context.simdShuffleDown(up, 4);
+            up += context.simdShuffleDown(up, 2);
+            up += context.simdShuffleDown(up, 1);
+            if ((localId & 31) == 0) {
+                warpSums[localId >> 5] = gate;
+                warpSums[warpCount + (localId >> 5)] = up;
+            }
+            context.localBarrier();
+            if (localId == 0) {
+                float gateSum = 0.0f;
+                float upSum = 0.0f;
+                for (int warp = 0; warp < warpCount; warp++) {
+                    gateSum += warpSums[warp];
+                    upSum += warpSums[warpCount + warp];
+                }
+                float silu = gateSum / (1.0f + TornadoMath.exp(-gateSum));
+                hb.set(rowId, silu * upSum);
+            }
+        }
+    }
+
+    /**
+     * This lane's share of row {@code rowId}'s dot product, folded across its warp with shuffles:
+     * valid in the warp's lane 0. The cross-warp combine stays in the kernel, which owns the local
+     * array it goes through.
+     */
+    private static float warpPartialDP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            IntArray xSums,
+            ByteArray w,
+            int n,
+            int rowId,
+            int localWorkGroupSize) {
+        float partialSum =
+                rowPartialDP4A(context, xQuants, xScales, xSums, w, n, rowId, localWorkGroupSize);
+        partialSum += context.simdShuffleDown(partialSum, 16);
+        partialSum += context.simdShuffleDown(partialSum, 8);
+        partialSum += context.simdShuffleDown(partialSum, 4);
+        partialSum += context.simdShuffleDown(partialSum, 2);
+        partialSum += context.simdShuffleDown(partialSum, 1);
+        return partialSum;
+    }
+
+    /**
+     * This lane's share of row {@code rowId}'s dot product, sixteen weights per step as {@link
+     * #matrixVectorGenericQ4_KDP4A} describes.
+     */
+    private static float rowPartialDP4A(
+            KernelContext context,
+            IntArray xQuants,
+            FloatArray xScales,
+            IntArray xSums,
+            ByteArray w,
+            int n,
+            int rowId,
+            int localWorkGroupSize) {
+        int localId = context.localIdx;
         int superBlocksPerRow = n / QK_K;
         int rowByteOffset = rowId * superBlocksPerRow * BLOCK_BYTES;
 
@@ -280,22 +425,7 @@ public final class TransformerComputeKernelsQ4_K {
                                             + min1 * xs1 * xSums.get(block1));
         }
 
-        partialSum += context.simdShuffleDown(partialSum, 16);
-        partialSum += context.simdShuffleDown(partialSum, 8);
-        partialSum += context.simdShuffleDown(partialSum, 4);
-        partialSum += context.simdShuffleDown(partialSum, 2);
-        partialSum += context.simdShuffleDown(partialSum, 1);
-        if ((localId & 31) == 0) {
-            warpSums[localId >> 5] = partialSum;
-        }
-        context.localBarrier();
-        if (localId == 0) {
-            float total = 0.0f;
-            for (int warp = 0; warp < warpCount; warp++) {
-                total += warpSums[warp];
-            }
-            output.set(rowId, total);
-        }
+        return partialSum;
     }
 
     /** {@code output[row] = w[row]·x}. Q4_K counterpart of {@code matrixVectorGenericQ8Byte}. */
