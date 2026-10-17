@@ -540,9 +540,10 @@ public final class PlanDispatchEvidence {
      * <p>The scheduler registers a worker grid for every JIT task the plan contains and for none of
      * its library tasks, because a cuBLAS or cuDNN call has no grid to launch. That asymmetry is
      * the evidence: a native projection is present as the <b>absence</b> of a {@code qkvProj} grid,
-     * and cuDNN attention as the presence of its three adapter grids where {@code batch_attention}
-     * would otherwise be. A system property cannot say this — it says what was asked for, and the
-     * capability probe may have answered no.
+     * and cuDNN attention as the presence of its three adapter grids where the generated attention
+     * would otherwise be: {@code batch_attention}, or {@code attn_gather} and the GEMM grids that
+     * follow it when that attention runs on the tensor cores. A system property cannot say this —
+     * it says what was asked for, and the capability probe may have answered no.
      */
     // @formatter:on
     public record NativePrefillEvidence(
@@ -550,7 +551,8 @@ public final class PlanDispatchEvidence {
             boolean nativeProjections,
             boolean cudnnAttention,
             boolean jitAttentionInPrimary,
-            boolean batchedFallbackFamily) {
+            boolean batchedFallbackFamily,
+            boolean tensorCoreAttentionInFallback) {
 
         /** Every native component this plan selected, for a message that names what it built. */
         public String describe() {
@@ -563,7 +565,9 @@ public final class PlanDispatchEvidence {
                     + " jitAttentionInPrimary="
                     + jitAttentionInPrimary
                     + " batchedFallbackFamily="
-                    + batchedFallbackFamily;
+                    + batchedFallbackFamily
+                    + " tensorCoreAttentionInFallback="
+                    + tensorCoreAttentionInFallback;
         }
     }
 
@@ -580,9 +584,11 @@ public final class PlanDispatchEvidence {
         boolean jitAttention = false;
         boolean jitProjection = false;
         boolean fallbackFamily = false;
+        boolean fallbackTensorCoreAttention = false;
         for (String task : keys) {
             if (task.startsWith("batchPrefillFallbackLayer_")) {
                 fallbackFamily = true;
+                fallbackTensorCoreAttention |= task.endsWith("attn_gather");
                 continue;
             }
             Matcher matcher = PRIMARY_GRAPH.matcher(task);
@@ -592,7 +598,7 @@ public final class PlanDispatchEvidence {
             primaryGraphs.add(Integer.parseInt(matcher.group(1)));
             if (task.endsWith("cudnn_pack_q")) {
                 cudnn = true;
-            } else if (task.endsWith("batch_attention")) {
+            } else if (task.endsWith("batch_attention") || task.endsWith("attn_gather")) {
                 jitAttention = true;
             } else if (task.endsWith("qkvProj")
                     || task.endsWith("gateUpProj")
@@ -605,7 +611,12 @@ public final class PlanDispatchEvidence {
                 "this plan has no batch-prefill layer graph at all: " + keys,
                 !primaryGraphs.isEmpty());
         return new NativePrefillEvidence(
-                primaryGraphs.size(), !jitProjection, cudnn, jitAttention, fallbackFamily);
+                primaryGraphs.size(),
+                !jitProjection,
+                cudnn,
+                jitAttention,
+                fallbackFamily,
+                fallbackTensorCoreAttention);
     }
 
     // @formatter:off
