@@ -55,7 +55,7 @@ public class DevstralQ8_0FFNLayersDecode extends DevstralQ8_0FFNLayers {
                     state.workspace.wrapHb,
                     weights.freq_cis_realFlat.asFloatArray(),
                     weights.freq_cis_imagFlat.asFloatArray());
-            layer.consumeFromDevice("decodeActivation", keyCache(), state.workspace.wrapValueCache);
+            layer.consumeFromDevice("decodeActivation", keyCache(), valueCache());
             layer.consumeFromDevice("decodeActivation", state.workspace.wrapBlockTable);
         } else {
             String pred = "layer_" + (layerIndex - 1);
