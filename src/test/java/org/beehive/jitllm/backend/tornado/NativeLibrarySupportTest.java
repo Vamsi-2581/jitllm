@@ -198,6 +198,15 @@ public class NativeLibrarySupportTest {
             }
         }
         assertEquals(
+                "gemma4 Q8_0 has an MLX path for its projections",
+                Optional.empty(),
+                check(
+                        "gemma4",
+                        DataType.Q8_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.METAL,
+                        false));
+        assertEquals(
                 "llama retains Q4_0 and has an MLX path for it",
                 Optional.empty(),
                 check(
@@ -222,7 +231,18 @@ public class NativeLibrarySupportTest {
             assertTrue(family + " Q4_0", reason.isPresent());
             assertTrue(reason.get(), reason.get().contains("on metal"));
         }
-        for (String family : new String[] {"devstral", "gemma4", "qwen35", "qwen2-moe"}) {
+        for (DataType weights : new DataType[] {DataType.F16, DataType.Q4_0}) {
+            assertTrue(
+                    "gemma4 " + weights,
+                    check(
+                                    "gemma4",
+                                    weights,
+                                    ExecutionMode.BATCH_PREFILL_DECODE,
+                                    BackendId.METAL,
+                                    false)
+                            .isPresent());
+        }
+        for (String family : new String[] {"devstral", "qwen35", "qwen2-moe"}) {
             for (DataType weights : new DataType[] {DataType.F16, DataType.Q8_0, DataType.Q4_0}) {
                 assertTrue(
                         family + " " + weights,
@@ -249,7 +269,7 @@ public class NativeLibrarySupportTest {
 
     @Test
     public void theMetalCapabilityIsNotTheCudaOne() {
-        // Gemma 4 has a cuBLAS path for Q8_0 and none on MLX; Llama has both.
+        // Gemma 4 has a cuBLAS path for Q4_0 and none on MLX; Llama has both.
         assertEquals(
                 Optional.empty(),
                 check(
@@ -258,10 +278,18 @@ public class NativeLibrarySupportTest {
                         ExecutionMode.BATCH_PREFILL_DECODE,
                         BackendId.CUDA,
                         true));
+        assertEquals(
+                Optional.empty(),
+                check(
+                        "gemma4",
+                        DataType.Q4_0,
+                        ExecutionMode.BATCH_PREFILL_DECODE,
+                        BackendId.CUDA,
+                        true));
         assertTrue(
                 check(
                                 "gemma4",
-                                DataType.Q8_0,
+                                DataType.Q4_0,
                                 ExecutionMode.BATCH_PREFILL_DECODE,
                                 BackendId.METAL,
                                 false)
