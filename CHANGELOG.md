@@ -2,6 +2,33 @@
 
 All notable changes to GPULlama3.java will be documented in this file.
 
+## [2.0.0] - 2026-10-19
+
+### Other Changes
+
+- Build against a TornadoVM SDK reached through a symlink (SDKMAN) ([#226](https://github.com/beehive-lab/jitllm/pull/226))
+- chore: add pre-commit Black and Spotless checks ([#202](https://github.com/beehive-lab/jitllm/pull/202))
+- Run Qwen3.5 Q8_0 batched prefill projections on SIMD-group GEMMs on Metal ([#224](https://github.com/beehive-lab/jitllm/pull/224))
+- Turn on batched prefill and native libraries by default on GPU ([#219](https://github.com/beehive-lab/jitllm/pull/219))
+- Split Qwen3.5 decode attention across positions on Metal ([#223](https://github.com/beehive-lab/jitllm/pull/223))
+- Run Devstral decode on packed integer projections and split-KV attention ([#222](https://github.com/beehive-lab/jitllm/pull/222))
+- Run Qwen3 FP16 prefill chunks after the first on tensor-core attention under cuDNN ([#221](https://github.com/beehive-lab/jitllm/pull/221))
+- Fix Qwen3.5 packed Q4_0 prefill below the FP16 pair's output width ([#220](https://github.com/beehive-lab/jitllm/pull/220))
+- Keep MLX batched-prefill projections inside FP16 range ([#217](https://github.com/beehive-lab/jitllm/pull/217))
+- Run Metal batched prefill on MLX under native libraries ([#206](https://github.com/beehive-lab/jitllm/pull/206))
+- Depend on TornadoVM release 7.3.1 for releases ([#216](https://github.com/beehive-lab/jitllm/pull/216))
+- Report token usage on streamed replies when the client asks for it ([#197](https://github.com/beehive-lab/jitllm/pull/197))
+- Parse a GGUF file's metadata once per load ([#209](https://github.com/beehive-lab/jitllm/pull/209))
+- Read GGUF metadata through a buffer ([#208](https://github.com/beehive-lab/jitllm/pull/208))
+- Build the Qwen 3 merge table in one loop ([#210](https://github.com/beehive-lab/jitllm/pull/210))
+- Batched prefill for every family, faster prefill and decode, multi-GPU ([#205](https://github.com/beehive-lab/jitllm/pull/205))
+- [build] Build against the TornadoVM SDK at TORNADOVM_HOME ([#199](https://github.com/beehive-lab/jitllm/pull/199))
+- Depend on TornadoVM release 7.1.0 for releases ([#198](https://github.com/beehive-lab/jitllm/pull/198))
+- Follow the Quarkus extension's rename to JitLLM, and drop PTX backend references ([#193](https://github.com/beehive-lab/jitllm/pull/193))
+- Render Qwen3.8's reasoning effort, and let callers choose it ([#196](https://github.com/beehive-lab/jitllm/pull/196))
+- Split text before mapping it to bytes in the byte-level BPE tokenizers ([#195](https://github.com/beehive-lab/jitllm/pull/195))
+- Restore the JBang entry point; fix NaN temperature in the CLI ([#194](https://github.com/beehive-lab/jitllm/pull/194))
+
 ## [1.0.2] - 2026-09-27
 
 ### Model Support
