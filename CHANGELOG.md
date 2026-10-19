@@ -4,6 +4,16 @@ All notable changes to GPULlama3.java will be documented in this file.
 
 ## [2.0.0] - 2026-10-19
 
+### Breaking changes
+
+- **GPU runs use the fast paths by default**: batched prefill (512 tokens per step) and the vendor native libraries (cuBLAS/cuDNN on CUDA tensor-core devices, MLX on Apple silicon) are on wherever the model supports them ([#219](https://github.com/beehive-lab/jitllm/pull/219)).
+- **FP16 key/value cache by default**, now also for Gemma 4 F16/BF16, Devstral and Qwen2-MoE; `--fp32-kv-cache` keeps FP32 ([#205](https://github.com/beehive-lab/jitllm/pull/205)).
+- **Llama Q4_0 stays Q4_0** (with its Q4_1 tensors) instead of being converted to Q8_0, so its outputs differ from 1.x ([#205](https://github.com/beehive-lab/jitllm/pull/205)).
+- **Sampling defaults**: an unset temperature and top-p use the request defaults (0.1 / 0.95) rather than each model family's own ([#194](https://github.com/beehive-lab/jitllm/pull/194)).
+- **Qwen3.8 reasons longer by default** with thinking on, as under llama.cpp and Ollama; `ReasoningEffort.MEDIUM` or `LOW` restores shorter answers ([#196](https://github.com/beehive-lab/jitllm/pull/196)).
+- **TornadoVM 7.3.1** (from 7.0.1) is the release dependency, and development builds compile against the SDK at `TORNADOVM_HOME` ([#199](https://github.com/beehive-lab/jitllm/pull/199), [#216](https://github.com/beehive-lab/jitllm/pull/216)).
+- **Quarkus**: the LangChain4j extension is renamed from `gpu-llama3` to JitLLM (`jitllm.version`), and the PTX backend references are gone ([#193](https://github.com/beehive-lab/jitllm/pull/193)).
+
 ### Other Changes
 
 - Build against a TornadoVM SDK reached through a symlink (SDKMAN) ([#226](https://github.com/beehive-lab/jitllm/pull/226))
