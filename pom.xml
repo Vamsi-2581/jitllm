@@ -225,12 +225,14 @@
                                     <variableName>TORNADOVM_HOME</variableName>
                                     <message>TORNADOVM_HOME is not set. jitllm compiles against the TornadoVM SDK it points at (7.3 or newer, on the JDK line of the JDK running Maven): install one (sdk install tornadovm) or prepare one (scripts/tornadovm-dev.sh setup) and export TORNADOVM_HOME.</message>
                                 </requireEnvironmentVariable>
-                                <requireFilesExist>
-                                    <files>
-                                        <file>${tornadovm.sdk.modules}</file>
-                                    </files>
+                                <!-- Not requireFilesExist: it also requires the path to equal its
+                                         canonical form, so it rejects any path through a symlink,
+                                         and SDKMAN's TORNADOVM_HOME (candidates/tornadovm/current)
+                                         is one. File.isDirectory follows symlinks. -->
+                                <evaluateBeanshell>
+                                    <condition>new java.io.File("${tornadovm.sdk.modules}").isDirectory()</condition>
                                     <message>TORNADOVM_HOME (${env.TORNADOVM_HOME}) is not a TornadoVM SDK: it has no share/java/tornado.</message>
-                                </requireFilesExist>
+                                </evaluateBeanshell>
                                 <!-- javac 21 only warns about the class files of a -jdk22plus SDK, so
                                          without this a JDK 21 build would succeed and fail at run
                                          time. The SDK records its line in etc/tornado.jdk. -->
