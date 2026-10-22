@@ -285,10 +285,12 @@ are not, the run prints a notice naming what to install and uses jitllm's own ke
 INFO: For maximum performance please install cuBLAS 12 and cuDNN 9; falling back to the JIT kernels.
 ```
 
-A wider chunk and CUDA graph replay are faster still:
+On CUDA, each plan is also captured once and replayed as a CUDA graph by default, which saves the
+per-kernel launch cost in decode; `--no-cuda-graphs` launches the kernels directly. OpenCL and
+Metal have no CUDA graphs, so the setting does not apply there. The chunk size can also be set:
 
 ```bash
-./jitllm run --gpu --cuda --cuda-graphs --with-prefill-decode --batch-prefill-size 512 \
+./jitllm run --gpu --cuda --with-prefill-decode --batch-prefill-size 1024 \
   -m Llama-3.2-1B-Instruct-Q8_0.gguf --prompt "..."
 ```
 
@@ -296,6 +298,7 @@ A wider chunk and CUDA graph replay are faster still:
 | --- | --- |
 | `--with-prefill-decode --batch-prefill-size N` | Prefill N tokens per step instead of the default |
 | `--no-batch-prefill` | Read the prompt one token at a time |
+| `--no-cuda-graphs` | Launch kernels directly instead of replaying CUDA graphs (CUDA only) |
 | `--with-native-libraries` | Require cuBLAS/cuDNN or MLX, and refuse a configuration without a native path |
 | `--no-native-libraries` | Keep jitllm's kernels; saves the device memory of the FP16 weight copies the native path stacks |
 
