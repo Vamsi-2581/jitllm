@@ -32,6 +32,25 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
  */
 public class LlamaQ4_0LayersBatchPrefill implements BatchPrefillTransformerLayerTaskGraphs {
 
+    @Override
+    public String describeProjections() {
+        return mlxProjections != null
+                ? "MLX GEMMs"
+                : BatchPrefillTransformerLayerTaskGraphs.super.describeProjections();
+    }
+
+    @Override
+    public String describeAttention() {
+        return mlxAttention != null
+                ? "MLX"
+                : BatchPrefillTransformerLayerTaskGraphs.super.describeAttention();
+    }
+
+    @Override
+    public String describeNativeLibraries() {
+        return mlxProjections != null || mlxAttention != null ? "MLX" : "none";
+    }
+
     static final int LOCAL_WORK_GROUP_SIZE = 32;
 
     private final LlamaState state;
