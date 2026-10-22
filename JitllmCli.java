@@ -61,10 +61,6 @@ public class JitllmCli {
         if (metal && System.getProperty("tornado.metal.priority") == null) {
             System.setProperty("tornado.metal.priority", "100");
         }
-        // The Metal kernels have no verified FP16 key/value path, so an FP32 cache is the only one.
-        if (System.getProperty("jitllm.kvcache.fp32") == null && metal) {
-            System.setProperty("jitllm.kvcache.fp32", "true");
-        }
         // MLX prefill on Metal: dispatch its library tasks asynchronously where the SDK supports it
         // safely (the release after TornadoVM 7.3.1), as the `jitllm` launcher does.
         if (System.getProperty("tornado.mlx.async") == null
