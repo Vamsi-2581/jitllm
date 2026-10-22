@@ -41,22 +41,36 @@ public final class DeviceDefaultPolicy {
             if (candidate.equals(chosen)) {
                 break;
             }
-            if (accepted(model, candidate, storage)) {
+            java.util.Optional<String> refused = refusal(model, candidate, storage);
+            if (refused.isEmpty()) {
                 return candidate;
+            }
+            if (candidate == accelerated
+                    && accelerated.nativeLibraries()
+                    && !batched.nativeLibraries()) {
+                // The native default was on and a plan check refused it: say so, or the run
+                // continues on the JIT kernels with nothing to tell the two apart.
+                LOGGER.log(
+                        System.Logger.Level.INFO,
+                        "Native libraries are off for this model: " + refused.get());
             }
         }
         return chosen;
     }
 
-    /** Whether the plan checks every GPU load runs accept {@code policy}. */
-    private static boolean accepted(Model model, ExecutionPolicy policy, StorageOptions storage) {
+    private static final System.Logger LOGGER =
+            System.getLogger(DeviceDefaultPolicy.class.getName());
+
+    /** Why the plan checks every GPU load runs refuse {@code policy}, or empty if they accept it. */
+    private static java.util.Optional<String> refusal(
+            Model model, ExecutionPolicy policy, StorageOptions storage) {
         try {
             Fp16KeyValueSupport.require(model, policy, storage, true);
             NativeLibrarySupport.require(model, policy, true);
             BatchPrefillSupport.require(model, policy, true);
-            return true;
+            return java.util.Optional.empty();
         } catch (UnsupportedOperationException refused) {
-            return false;
+            return java.util.Optional.of(String.valueOf(refused.getMessage()));
         }
     }
 }
