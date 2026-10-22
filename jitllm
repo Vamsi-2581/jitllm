@@ -115,7 +115,12 @@ class LlamaRunner:
     @staticmethod
     def select_primary_backend(installed: List[Backend]) -> Backend:
         """Pick which installed backend to report/default to when the SDK has more than one."""
-        for backend in BACKEND_PRIORITY:
+        order = BACKEND_PRIORITY
+        if platform.system() == "Darwin":
+            # Apple's OpenCL is deprecated and its kernels have no verified FP16 key/value path,
+            # so an SDK built with Metal and OpenCL runs on Metal on a Mac.
+            order = [Backend.METAL] + [b for b in BACKEND_PRIORITY if b != Backend.METAL]
+        for backend in order:
             if backend in installed:
                 return backend
         return installed[0]

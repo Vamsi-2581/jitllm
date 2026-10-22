@@ -158,6 +158,19 @@ class VerbosityOptions(unittest.TestCase):
                 if saved is not None:
                     os.environ["JAVA_TOOL_OPTIONS"] = saved
 
+    def test_metal_is_preferred_on_macos(self):
+        both = [launcher.Backend.OPENCL, launcher.Backend.METAL]
+        real = launcher.platform.system
+        try:
+            launcher.platform.system = lambda: "Darwin"
+            self.assertEqual(launcher.Backend.METAL, launcher.LlamaRunner.select_primary_backend(both))
+            self.assertEqual(launcher.Backend.OPENCL,
+                             launcher.LlamaRunner.select_primary_backend([launcher.Backend.OPENCL]))
+            launcher.platform.system = lambda: "Linux"
+            self.assertEqual(launcher.Backend.OPENCL, launcher.LlamaRunner.select_primary_backend(both))
+        finally:
+            launcher.platform.system = real
+
     def test_mlx_async_is_on_for_metal_after_tornadovm_7_3_1(self):
         self.assertIn("-Dtornado.mlx.async=true", self.metal_command("7.3.2-jdk22plus-dev"))
         self.assertIn("-Dtornado.mlx.async=true", self.metal_command("7.4.0"))
