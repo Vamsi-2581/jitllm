@@ -61,6 +61,11 @@ public class LlamaFP16LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         return "FP16 tensor-core MMA";
     }
 
+    @Override
+    public String describeNativeLibraries() {
+        return splitK.nativeGemm() ? "cuBLAS" : "none";
+    }
+
     // Local size for the parallel RMS reductions (one workgroup per token).
     static final int RMS_LOCAL_SIZE = 256;
 

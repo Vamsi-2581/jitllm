@@ -278,4 +278,9 @@ public final class FP16Projections {
                 name -> scheduler.addWorkerGrid(name, WorkerGridFactory.genericWorker(1, 1)));
         gemm.addGrids(scheduler);
     }
+
+    /** Whether the projections run as cuBLAS GEMMs rather than jitllm's kernels. */
+    public boolean nativeGemm() {
+        return gemm.nativeGemm();
+    }
 }
