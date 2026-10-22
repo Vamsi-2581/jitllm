@@ -3,6 +3,7 @@ package org.beehive.jitllm.backend.tornado;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.beehive.jitllm.backend.tornado.Fp16KeyValueSupport.Combination;
+import org.beehive.jitllm.backend.tornado.device.TornadoDevices;
 import org.beehive.jitllm.backend.tornado.plan.ExecutionMode;
 import org.beehive.jitllm.backend.tornado.plan.TornadoPlanRegistry;
 import org.beehive.jitllm.model.Model;
@@ -63,6 +64,14 @@ public final class NativeLibrarySupport {
                     "falling back to the JIT kernels");
             return policy;
         }
+        if (!metal) {
+            Optional<String> tooOld =
+                    NativePrefillSupport.cublasTooOld(TornadoDevices.targetCudaComputeCapability());
+            if (tooOld.isPresent()) {
+                notice(tooOld.get() + "; falling back to the JIT kernels");
+                return policy;
+            }
+        }
         if (!metal && !loads(NativePrefillSupport::cudnnAvailable)) {
             noteInstall("cuDNN 9", "prefill attention falls back to the JIT kernels");
         }
@@ -95,10 +104,13 @@ public final class NativeLibrarySupport {
     }
 
     private static void noteInstall(String libraries, String fallback) {
+        notice("For maximum performance please install " + libraries + "; " + fallback);
+    }
+
+    /** Prints a notice about the native libraries, once per process. */
+    private static void notice(String message) {
         if (INSTALL_NOTICE.compareAndSet(false, true)) {
-            LOGGER.log(
-                    System.Logger.Level.INFO,
-                    "For maximum performance please install " + libraries + "; " + fallback + ".");
+            LOGGER.log(System.Logger.Level.INFO, message + ".");
         }
     }
 
@@ -167,6 +179,10 @@ public final class NativeLibrarySupport {
                                         + " loader cache)");
             } else if (!NativePrefillSupport.cublasAvailable()) {
                 reason = Optional.of("cuBLAS could not be loaded in this process");
+            } else {
+                reason =
+                        NativePrefillSupport.cublasTooOld(
+                                TornadoDevices.targetCudaComputeCapability());
             }
         }
         reason.ifPresent(
