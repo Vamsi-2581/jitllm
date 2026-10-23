@@ -36,6 +36,25 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 // @formatter:on
 public class GraniteFP16LayersBatchPrefill implements BatchPrefillTransformerLayerTaskGraphs {
 
+    @Override
+    public String describeProjections() {
+        return mlxProjections != null
+                ? "MLX GEMMs"
+                : BatchPrefillTransformerLayerTaskGraphs.super.describeProjections();
+    }
+
+    @Override
+    public String describeAttention() {
+        return mlxAttention != null
+                ? "MLX"
+                : BatchPrefillTransformerLayerTaskGraphs.super.describeAttention();
+    }
+
+    @Override
+    public String describeNativeLibraries() {
+        return mlxProjections != null || mlxAttention != null ? "MLX" : "none";
+    }
+
     private final GraniteState state;
     private final GraniteTornadoWeights weights;
     private final GraniteConfiguration config;

@@ -153,6 +153,25 @@ public final class NativePrefillSupport {
                 .contains("linux")) {
             return true;
         }
+        if (resolvedCublasLt().isPresent()) {
+            return true;
+        }
+        try {
+            byte[] cache =
+                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of("/etc/ld.so.cache"));
+            return new String(cache, java.nio.charset.StandardCharsets.ISO_8859_1)
+                    .contains(CUBLAS_LT_SONAME);
+        } catch (java.io.IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The file {@value #CUBLAS_LT_SONAME} names on {@code LD_LIBRARY_PATH} or in a default
+     * directory, the first one the dynamic loader would try, with symbolic links followed; empty
+     * when it is not there (it may still be in the loader cache).
+     */
+    static java.util.Optional<java.nio.file.Path> resolvedCublasLt() {
         java.util.List<String> directories = new java.util.ArrayList<>();
         String path = System.getenv("LD_LIBRARY_PATH");
         if (path != null) {
@@ -167,20 +186,84 @@ public final class NativePrefillSupport {
                         "/lib/aarch64-linux-gnu",
                         "/usr/lib/aarch64-linux-gnu"));
         for (String directory : directories) {
-            if (!directory.isEmpty()
-                    && java.nio.file.Files.exists(
-                            java.nio.file.Path.of(directory, CUBLAS_LT_SONAME))) {
-                return true;
+            if (directory.isEmpty()) {
+                continue;
+            }
+            java.nio.file.Path file = java.nio.file.Path.of(directory, CUBLAS_LT_SONAME);
+            if (java.nio.file.Files.exists(file)) {
+                try {
+                    return java.util.Optional.of(file.toRealPath());
+                } catch (java.io.IOException | RuntimeException e) {
+                    return java.util.Optional.of(file);
+                }
             }
         }
-        try {
-            byte[] cache =
-                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of("/etc/ld.so.cache"));
-            return new String(cache, java.nio.charset.StandardCharsets.ISO_8859_1)
-                    .contains(CUBLAS_LT_SONAME);
-        } catch (java.io.IOException | RuntimeException e) {
-            return false;
+        return java.util.Optional.empty();
+    }
+
+    /** The first compute capability (major*10+minor) of NVIDIA's Blackwell GPUs. */
+    static final int BLACKWELL_COMPUTE_CAPABILITY = 100;
+
+    /** The first cuBLAS release, as major*100+minor, with kernels for Blackwell GPUs. */
+    static final int BLACKWELL_CUBLAS = 1208;
+
+    /**
+     * The release a cuBLAS library file name gives, as major*100+minor: {@code
+     * libcublasLt.so.12.0.2.224} is 1200 and {@code libcublasLt.so.13} is 1300; -1 for a name with
+     * no version. Package-private for the unit test.
+     */
+    static int cublasVersionOf(String fileName) {
+        java.util.regex.Matcher m =
+                java.util.regex.Pattern.compile("\\.so\\.(\\d+)(?:\\.(\\d+))?").matcher(fileName);
+        if (!m.find()) {
+            return -1;
         }
+        int major = Integer.parseInt(m.group(1));
+        int minor = m.group(2) == null ? 0 : Integer.parseInt(m.group(2));
+        return major * 100 + minor;
+    }
+
+    // @formatter:off
+    /**
+     * Why the cuBLAS the loader resolves cannot serve a device of this compute capability, or empty
+     * when it can or when that cannot be told.
+     *
+     * <p>A cuBLAS older than the GPU still loads and returns correct results, but without kernels
+     * for the architecture it runs generic ones: on an RTX 5070 Ti (compute capability 12.0) with
+     * cuBLAS 12.0, the native prefill is two to three times slower than jitllm's own kernels.
+     * Checked from the file name, so nothing is loaded.
+     */
+    // @formatter:on
+    public static java.util.Optional<String> cublasTooOld(int computeCapability) {
+        if (computeCapability < BLACKWELL_COMPUTE_CAPABILITY) {
+            return java.util.Optional.empty();
+        }
+        return resolvedCublasLt().flatMap(file -> cublasTooOld(computeCapability, file));
+    }
+
+    /**
+     * {@link #cublasTooOld(int)} for a resolved library file. Package-private for the unit test.
+     */
+    static java.util.Optional<String> cublasTooOld(int computeCapability, java.nio.file.Path file) {
+        int version = cublasVersionOf(file.getFileName().toString());
+        if (computeCapability < BLACKWELL_COMPUTE_CAPABILITY
+                || version < 0
+                || version >= BLACKWELL_CUBLAS) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(
+                String.format(
+                        "%s resolves to cuBLAS %d.%d (%s), which has no kernels for this GPU"
+                                + " (compute capability %d.%d needs cuBLAS %d.%d or newer); put a"
+                                + " newer cuBLAS on LD_LIBRARY_PATH",
+                        CUBLAS_LT_SONAME,
+                        version / 100,
+                        version % 100,
+                        file,
+                        computeCapability / 10,
+                        computeCapability % 10,
+                        BLACKWELL_CUBLAS / 100,
+                        BLACKWELL_CUBLAS % 100));
     }
 
     /** Whether cuDNN can be reached from this process at all. */

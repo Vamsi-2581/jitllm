@@ -201,6 +201,8 @@ class LlamaRunner:
 
         if args.cuda_graphs:
             cmd.append("-Djitllm.cudaGraphs=true")
+        elif args.no_cuda_graphs:
+            cmd.append("-Djitllm.cudaGraphs=false")
 
         if args.split_kv_attention:
             cmd.append("-Djitllm.attention.splitKv=true")
@@ -603,6 +605,8 @@ def parse_cli_args(argv):
         parser.error("chat reads prompts from the terminal; --prompt/--suffix are run-only")
     if args.with_native_libraries and args.no_native_libraries:
         parser.error("--with-native-libraries and --no-native-libraries conflict")
+    if args.cuda_graphs and args.no_cuda_graphs:
+        parser.error("--cuda-graphs and --no-cuda-graphs conflict")
     if args.no_batch_prefill and (args.with_prefill_decode or args.batch_prefill_size is not None):
         parser.error("--no-batch-prefill conflicts with --with-prefill-decode and --batch-prefill-size")
     if mode == "serve":
@@ -788,7 +792,11 @@ def create_parser(command=None) -> argparse.ArgumentParser:
         help="Keep the key/value cache in FP32 instead of FP16: twice the key/value-cache storage. "
              "For numerical reference, and where FP16 is unsupported (the run says so)")
     advanced_group.add_argument("--cuda-graphs", dest="cuda_graphs", action="store_true",
-                                help="Capture and replay CUDA graphs (CUDA backend only)")
+                                help="Capture and replay CUDA graphs (default on the CUDA backend; "
+                                     "OpenCL and Metal have none)")
+    advanced_group.add_argument("--no-cuda-graphs", dest="no_cuda_graphs", action="store_true",
+                                help="Launch each task graph's kernels directly instead of replaying "
+                                     "a captured CUDA graph")
     advanced_group.add_argument("--split-kv-attention", dest="split_kv_attention", action="store_true",
                                 help="Split each attention head's positions across several workgroups "
                                      "(flash-decoding; CUDA with an FP16 KV cache)")

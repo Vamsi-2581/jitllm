@@ -60,6 +60,11 @@ public class Qwen3Q8_0LayersBatchPrefillMMA implements BatchPrefillTransformerLa
         return "FP16 tensor-core MMA (Q8_0 weights dequantized)";
     }
 
+    @Override
+    public String describeNativeLibraries() {
+        return projections.nativeGemm() ? "cuBLAS" : "none";
+    }
+
     // Local size for the parallel RMS reductions (one workgroup per token).
     static final int RMS_LOCAL_SIZE = 256;
 

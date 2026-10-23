@@ -76,6 +76,11 @@ import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 public class Gemma4BatchPrefillLayers implements BatchPrefillTransformerLayerTaskGraphs {
 
     @Override
+    public String describeNativeLibraries() {
+        return mlx != null ? "MLX" : nativeProjections ? "cuBLAS" : "none";
+    }
+
+    @Override
     public String describeProjections() {
         if (mlx != null) {
             return mlx.projections() == MlxPrefill.Projections.AFFINE

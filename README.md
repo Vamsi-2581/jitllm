@@ -281,10 +281,12 @@ are not, the run prints a notice naming what to install and uses jitllm's own ke
 INFO: For maximum performance please install cuBLAS 12 and cuDNN 9; falling back to the JIT kernels.
 ```
 
-CUDA graph replay is faster still:
+On CUDA, each plan is also captured once and replayed as a CUDA graph by default, which saves the
+per-kernel launch cost in decode; `--no-cuda-graphs` launches the kernels directly. OpenCL and
+Metal have no CUDA graphs, so the setting does not apply there. The chunk size can also be set:
 
 ```bash
-./jitllm run --gpu --cuda --cuda-graphs \
+./jitllm run --gpu --cuda --batch-prefill-size 1024 \
   -m Llama-3.2-1B-Instruct-Q8_0.gguf --prompt "..."
 ```
 
@@ -292,6 +294,7 @@ CUDA graph replay is faster still:
 | --- | --- |
 | `--batch-prefill-size N` | Prefill N tokens per step instead of the default 512 |
 | `--no-batch-prefill` | Read the prompt one token at a time |
+| `--no-cuda-graphs` | Launch kernels directly instead of replaying CUDA graphs (CUDA only) |
 | `--with-native-libraries` | Require cuBLAS/cuDNN or MLX, and refuse a configuration without a native path |
 | `--no-native-libraries` | Keep jitllm's kernels; saves the device memory of the FP16 weight copies the native path stacks |
 
@@ -321,7 +324,12 @@ Prompt processing on an NVIDIA A100 80GB (pp512, tok/s, best configuration each)
 
 The native path needs cuBLAS 12: the TornadoVM binding loads `libcublasLt.so.12`. On a
 CUDA 13 machine, put a CUDA 12 cuBLAS (for example the `nvidia-cublas-cu12` wheel's `lib`
-directory) on `LD_LIBRARY_PATH`. Qwen3 F16 also runs the first prompt chunk's attention in cuDNN when
+directory) on `LD_LIBRARY_PATH`. Blackwell GPUs (RTX 50 series, B200; compute capability 10.0
+and up) need cuBLAS 12.8 or newer: an older `libcublasLt.so.12` loads but runs generic kernels,
+two to three times slower than jitllm's own, so jitllm prints a notice and keeps its kernels, and
+`--with-native-libraries` refuses. Links named `libcublasLt.so.12` and `libcublas.so.12` to CUDA
+13's `libcublasLt.so.13` and `libcublas.so.13`, in a directory on `LD_LIBRARY_PATH`, also work.
+Qwen3 F16 also runs the first prompt chunk's attention in cuDNN when
 cuDNN 9 is present: build TornadoVM's `libtornado-cudnn.so` (`tornado-drivers/cudnn-jni`) against
 cuDNN 9 (for example the `nvidia-cudnn-cu12` wheel) and add its `lib` directory to
 `LD_LIBRARY_PATH`; with cuDNN 8.9 that attention falls back to jitllm's kernels (36k instead of

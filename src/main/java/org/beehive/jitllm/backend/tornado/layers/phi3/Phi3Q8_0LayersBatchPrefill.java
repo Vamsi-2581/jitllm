@@ -34,6 +34,25 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 // @formatter:on
 public class Phi3Q8_0LayersBatchPrefill implements BatchPrefillTransformerLayerTaskGraphs {
 
+    @Override
+    public String describeProjections() {
+        return mlxProjections != null
+                ? "MLX GEMMs"
+                : BatchPrefillTransformerLayerTaskGraphs.super.describeProjections();
+    }
+
+    @Override
+    public String describeAttention() {
+        return mlxAttention != null
+                ? "MLX"
+                : BatchPrefillTransformerLayerTaskGraphs.super.describeAttention();
+    }
+
+    @Override
+    public String describeNativeLibraries() {
+        return mlxProjections != null || mlxAttention != null ? "MLX" : "none";
+    }
+
     /** Phi-3's RoPE base, fixed in its single-token kernel too. */
     private static final float ROPE_THETA = 10000.0f;
 

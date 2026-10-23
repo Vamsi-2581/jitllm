@@ -40,8 +40,11 @@ public interface TornadoVMMasterPlan {
      */
     boolean ENABLE_TORNADOVM_INIT_TIME = Boolean.getBoolean("jitllm.EnableTimingForTornadoVMInit");
 
-    /** When {@code true}, {@code withCUDAGraph()} is called — CUDA backend only. */
-    boolean CUDA_GRAPHS = Boolean.parseBoolean(System.getProperty("jitllm.cudaGraphs", "false"));
+    /**
+     * When {@code true}, {@code withCUDAGraph()} is called: on by default on the CUDA backend, off
+     * with {@code --no-cuda-graphs}, never on elsewhere (see {@link CudaGraphDefault}).
+     */
+    boolean CUDA_GRAPHS = CudaGraphDefault.enabled();
 
     /**
      * @deprecated Replaced by {@code state.executionPolicy()}. This constant survives only for

@@ -52,6 +52,14 @@ import uk.ac.manchester.tornado.api.types.arrays.HalfFloatArray;
 public class Qwen35BatchPrefillLayers implements BatchPrefillTransformerLayerTaskGraphs {
 
     @Override
+    public String describeNativeLibraries() {
+        return org.beehive.jitllm.backend.tornado.NativePrefillSupport.nativeProjections(
+                        state.executionPolicy())
+                ? "cuBLAS"
+                : "none";
+    }
+
+    @Override
     public String describeProjections() {
         if (q8DirectGemms.isEmpty()
                 && dequantTasks.isEmpty()
