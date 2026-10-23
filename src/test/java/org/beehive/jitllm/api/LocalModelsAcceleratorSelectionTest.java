@@ -110,9 +110,9 @@ public class LocalModelsAcceleratorSelectionTest {
 
     @Test
     public void explicitCudaFailsBeforeAnyFileIsTouched() {
-        // Request a backend other than the one that resolves here, so it is always a mismatch: CUDA,
-        // or OpenCL on a machine whose CUDA device resolves. The point under test is that the
-        // failure is UnsupportedOperationException, not a file-system error, which is only
+        // Request a backend other than the one that resolves here, so it is always a mismatch:
+        // CUDA, or OpenCL on a machine whose CUDA device resolves. The point under test is that
+        // the failure is UnsupportedOperationException, not a file-system error, which is only
         // possible if useGpu() ran (and threw) before ModelLoader ever opened NONEXISTENT.
         BackendId resolved =
                 DeviceResolvers.discovered().map(r -> r.resolve().backend()).orElse(null);
