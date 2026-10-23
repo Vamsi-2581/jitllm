@@ -5,8 +5,8 @@ import org.beehive.jitllm.runtime.backend.BackendId;
 
 /**
  * Whether plans are captured and replayed as CUDA graphs: on by default on the CUDA backend, off
- * with {@code -Djitllm.cudaGraphs=false} ({@code --no-cuda-graphs}), and never on for OpenCL,
- * Metal or a host-only run, which have no CUDA graphs.
+ * with {@code -Djitllm.cudaGraphs=false} ({@code --no-cuda-graphs}), and never on for OpenCL, Metal
+ * or a host-only run, which have no CUDA graphs.
  */
 final class CudaGraphDefault {
 

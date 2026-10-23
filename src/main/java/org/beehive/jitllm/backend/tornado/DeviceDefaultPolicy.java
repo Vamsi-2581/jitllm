@@ -61,7 +61,9 @@ public final class DeviceDefaultPolicy {
     private static final System.Logger LOGGER =
             System.getLogger(DeviceDefaultPolicy.class.getName());
 
-    /** Why the plan checks every GPU load runs refuse {@code policy}, or empty if they accept it. */
+    /**
+     * Why the plan checks every GPU load runs refuse {@code policy}, or empty if they accept it.
+     */
     private static java.util.Optional<String> refusal(
             Model model, ExecutionPolicy policy, StorageOptions storage) {
         try {

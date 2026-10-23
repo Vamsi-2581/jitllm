@@ -211,18 +211,15 @@ public class JitllmBench {
                         benchModel(
                                 modelPath, tests, reps, warmup, delay, batchSize, onCpu, expect));
             } catch (UnsupportedOperationException e) {
-                // A configuration the plan checks refuse: their message names the cause and the fix.
+                // A configuration the plan checks refuse: their message names the cause and the
+                // fix.
                 failed = true;
                 System.err.printf(
                         Locale.ROOT, "[bench] %s FAILED: %s%n", modelPath, e.getMessage());
             } catch (Throwable e) {
                 failed = true;
                 System.err.printf(
-                        Locale.ROOT,
-                        "[bench] %s FAILED (batch=%d): %s%n",
-                        modelPath,
-                        batchSize,
-                        e);
+                        Locale.ROOT, "[bench] %s FAILED (batch=%d): %s%n", modelPath, batchSize, e);
             }
         }
 

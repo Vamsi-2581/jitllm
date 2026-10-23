@@ -241,9 +241,10 @@ public final class NativePrefillSupport {
         return resolvedCublasLt().flatMap(file -> cublasTooOld(computeCapability, file));
     }
 
-    /** {@link #cublasTooOld(int)} for a resolved library file. Package-private for the unit test. */
-    static java.util.Optional<String> cublasTooOld(
-            int computeCapability, java.nio.file.Path file) {
+    /**
+     * {@link #cublasTooOld(int)} for a resolved library file. Package-private for the unit test.
+     */
+    static java.util.Optional<String> cublasTooOld(int computeCapability, java.nio.file.Path file) {
         int version = cublasVersionOf(file.getFileName().toString());
         if (computeCapability < BLACKWELL_COMPUTE_CAPABILITY
                 || version < 0
