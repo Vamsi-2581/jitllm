@@ -1,6 +1,12 @@
 # Changelog
 
-All notable changes to GPULlama3.java will be documented in this file.
+All notable changes to jitllm (formerly GPULlama3.java) will be documented in this file.
+
+jitllm releases are published as `io.github.beehive-lab:jitllm` and tagged `jitllm-vX.Y.Z`.
+Releases up to and including 1.0.0 of 2026-07-28 are GPULlama3.java releases (artifact
+`gpu-llama3`), tagged `vX.Y.Z`. Entries keep the names of their time: the
+`llama-tornado` and `llamaTornado` launchers are now `jitllm` and `jitllm4j`, and `-Dllama.*`
+properties are now `-Djitllm.*`.
 
 ## [2.0.0] - 2026-10-19
 
@@ -102,13 +108,13 @@ All notable changes to GPULlama3.java will be documented in this file.
 - docs(arch): ARCH-01..15 — review issues on the architecture baseline ([#140](https://github.com/beehive-lab/jitllm/pull/140))
 - Release 1.0.0 ([#139](https://github.com/beehive-lab/jitllm/pull/139))
 - Fix IllegalArgumentException (negative ArrayList capacity) on prompts longer than max-tokens ([#128](https://github.com/beehive-lab/jitllm/pull/128))
-- On-device greedy sampling (-Dllama.deviceSample): GPU argmax, keep logits device-side (~500x less D2H) ([#134](https://github.com/beehive-lab/jitllm/pull/134))
+- On-device greedy sampling (-Dllama.deviceSample, now -Djitllm.deviceSample): GPU argmax, keep logits device-side (~500x less D2H) ([#134](https://github.com/beehive-lab/jitllm/pull/134))
 - Fix Qwen3 FP16 garbage on CUDA backend: cross-workgroup race in RMS-norm reduction ([#132](https://github.com/beehive-lab/jitllm/pull/132))
 - Docs: modernize README — position as JVM-native LLM inference & serving engine ([#136](https://github.com/beehive-lab/jitllm/pull/136))
 - Add llama-bench-style benchmark: llama-tornado --bench (pp/tg/pg matrix, avg±stddev t/s, md/csv/json) ([#133](https://github.com/beehive-lab/jitllm/pull/133))
 - OpenAI-compatible server (llama-tornado --server): /v1/chat/completions + /v1/completions, streaming, zero-dep ([#135](https://github.com/beehive-lab/jitllm/pull/135))
 
-## [1.0.0] - 2026-07-28
+## [1.0.0] - 2026-07-28 (GPULlama3.java, `gpu-llama3`)
 
 ### Features
 
