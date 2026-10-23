@@ -232,21 +232,26 @@ projection, its RoPE) rather than copying the layer graph.
   any configuration without one; `--no-native-libraries` keeps the JIT kernels. The TornadoVM binding loads `libcublasLt.so.12`. For Qwen3 F16 the first
   chunk's attention runs as a cuDNN fused SDPA when the TornadoVM cuDNN shim is built against
   cuDNN 9; against cuDNN 8.9 the plan cannot be built and the tensor-core GEMM attention runs.
-- **Native libraries on Metal (Apple MLX).** With `--with-native-libraries` on a Metal device
-  the batched prefill runs every chunk's attention as MLX's fused causal attention over the
+- **Native libraries on Metal (Apple MLX).** On a Metal device, by default where the model has
+  an MLX path and MLX loads, the batched prefill runs every chunk's attention as MLX's fused causal attention over the
   chunk's context, gathered from the paged cache into contiguous FP16 buffers, and its four
   projections as MLX GEMMs, launched by TornadoVM's `tornado-mlx` library tasks on TornadoVM's
   own queue and buffers (`MlxPrefill`). Decode stays on the JIT kernels. Each provider declares
   the weights it implements per backend (`TornadoPlanProvider.nativeLibraryWeights(BackendId)`):
   on Metal Llama (F16, Q8_0, Q4_0), Mistral, Qwen2 / DeepSeek, Qwen3, Phi-3 and Granite
-  (F16, Q8_0), and Gemma 4 (Q8_0); everything else is refused. F16 weights are multiplied as they are, split Q/K/V
+  (F16, Q8_0), and Gemma 4 (Q8_0); everything else runs the JIT kernels.
+  `--with-native-libraries` requires the MLX path and refuses any configuration without one;
+  `--no-native-libraries` keeps the JIT kernels. F16 weights are multiplied as they are, split Q/K/V
   and gate/up stacked into one copy each. Q8_0 and Q4_0 weights are either decoded once into
   resident FP16 copies or repacked exactly into MLX's affine format — the same
   `decodedProjections` residency as above, settled against the budget at load or pinned with
   `-Djitllm.prefill.decodedProjections=resident|per-chunk`. Packed projections are refused by
-  name. Needs `brew install mlx` (MLX 0.32.3) and an M4-class GPU; validated with
-  `-Dtornado.mlx.async=true`, without which every MLX call waits for the GPU and prefill is
-  slower than the JIT kernels.
+  name. Needs `brew install mlx` (MLX 0.32.3) and an M4-class GPU. MLX calls should be
+  dispatched without waiting for the GPU (`-Dtornado.mlx.async=true`); otherwise prefill is
+  slower than the JIT kernels. The `jitllm` launcher and the JBang script set it on Metal with a
+  TornadoVM SDK newer than 7.3.1, whose asynchronous mode also waits for MLX work before host
+  reads and writes; with TornadoVM 7.3.1 it stays off. `JAVA_TOOL_OPTIONS` overrides the
+  launcher, and an embedding application sets it as a system property.
 
 Prompt processing on an NVIDIA A100 80GB (pp512, chunk 512, `--cuda-graphs`, tok/s); batched
 greedy text matches single-token text except where noted:
