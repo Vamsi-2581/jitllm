@@ -91,7 +91,7 @@ public final class Q8_0FloatTensor extends FloatTensor {
         if (QUANTIZE_ACTIVATION) {
             return dotQ8Activation(thisOffset, that, thatOffset, size);
         }
-        if (USE_VECTOR_API && (F_SPECIES.vectorBitSize() == 128 || F_SPECIES.vectorBitSize() == 256)) {
+        if (USE_VECTOR_API && supportsVectorizedDot(F_SPECIES)) {
             return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
         } else {
             return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
