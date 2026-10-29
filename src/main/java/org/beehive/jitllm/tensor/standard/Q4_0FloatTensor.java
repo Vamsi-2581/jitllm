@@ -80,8 +80,7 @@ public final class Q4_0FloatTensor extends FloatTensor {
 
     @Override
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
-        if (JitllmApp.USE_VECTOR_API
-                && (F_SPECIES.vectorBitSize() == 128 || F_SPECIES.vectorBitSize() == 256)) {
+        if (JitllmApp.USE_VECTOR_API && supportsVectorizedDot(F_SPECIES)) {
             return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
         } else {
             return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
